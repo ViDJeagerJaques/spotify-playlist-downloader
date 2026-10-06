@@ -1,3 +1,16 @@
+# Core runtime dependencies for the Streamlit app.
+# Install with:  pip install -r requirements.txt
+#
+#   streamlit        -> web UI (python -m streamlit run app.py)
+#   requests         -> HTTP client for SoundLoaders / SpotiDown (providers/*)
+#   beautifulsoup4   -> HTML parsing of provider responses (providers/parsing.py)
+#   lxml             -> fast HTML parser used by BeautifulSoup (optional but
+#                       recommended; code falls back to html.parser if missing)
+#   jinja2           -> bundled/streamlit ecosystem template dependency; kept
+#                       explicit so environment versions stay consistent
+
 streamlit>=1.40
 requests>=2.31
 beautifulsoup4>=4.12
+lxml>=5.0
+jinja2>=3.1

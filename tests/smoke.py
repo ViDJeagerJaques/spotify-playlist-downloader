@@ -150,12 +150,69 @@ def test_i18n():
     check("i18n: fallback to key", i18n.tr("xx", "no.such.key") == "no.such.key")
 
 
+def test_retry_failed_recovers():
+    """Expired token fails tracks as captcha -> fresh token recovers them."""
+    from providers.base import CaptchaRequiredError, Track as TrackT  # noqa: E402
+
+    class Flaky(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self.token_ok = False
+
+        def resolve_track(self, track, cftoken=""):
+            if not self.token_ok and track.track_token.endswith(("-neon-lights", "-golden-hour")):
+                raise CaptchaRequiredError("token expired", details="token_len=3")
+            return super().resolve_track(track, cftoken=cftoken)
+
+    provider = Flaky()
+    tracks = provider.load_tracks("mock://playlist").tracks
+    orch = BatchOrchestrator(provider, mode=DownloadMode.STREAM_LOCAL)
+    result = orch.run(tracks, cftoken="OLD")
+    check("retry: 2 failed 3 ok", result.failed == 2 and result.ok == 3, result.summary)
+    kinds = {o.error_kind for o in result.outcomes if o.state == TrackState.FAILED}
+    check("retry: kinds marked captcha", kinds == {"captcha"}, str(kinds))
+
+    provider.token_ok = True  # user solved CAPTCHA again -> fresh token
+    summary = orch.retry_failed(result, tracks, cftoken="NEW")
+    check("retry: recovered 2", summary["recovered"] == 2 and summary["still_failed"] == 0,
+          str(summary))
+    check("retry: counts ok", result.ok == len(tracks) and result.failed == 0, result.summary)
+    if result.zip_path:
+        with zipfile.ZipFile(result.zip_path) as zf:
+            names = zf.namelist()
+            check("retry: zip merged all", len(names) == len(tracks), str(names))
+        result.zip_path.unlink(missing_ok=True)
+
+
+def test_retry_keeps_other_failures():
+    """Non-token failures are classified and stay failed after retry."""
+    from providers.base import ServiceError  # noqa: E402
+
+    class Flaky2(MockProvider):
+        def resolve_track(self, track, cftoken=""):
+            if track.track_token.endswith("-neon-lights"):
+                raise ServiceError("no MP3 link")
+            return super().resolve_track(track, cftoken=cftoken)
+
+    provider = Flaky2()
+    tracks = provider.load_tracks("mock://playlist").tracks
+    orch = BatchOrchestrator(provider, mode=DownloadMode.KEEP_URL)
+    result = orch.run(tracks)
+    kinds = {o.error_kind for o in result.outcomes if o.state == TrackState.FAILED}
+    check("retry: kind marked service", kinds == {"service"}, str(kinds))
+    summary = orch.retry_failed(result, tracks, cftoken="NEW")
+    check("retry: nothing recovered", summary["recovered"] == 0 and summary["still_failed"] == 1,
+          str(summary))
+
+
 def main():
     test_parser_soundloaders()
     test_parser_spotidown()
     test_first_mp3()
     test_orchestrator_mock_zip()
     test_i18n()
+    test_retry_failed_recovers()
+    test_retry_keeps_other_failures()
     print(f"PASS={len(PASS)} FAIL={len(FAIL)}")
     if FAIL:
         print("Failures:", FAIL)

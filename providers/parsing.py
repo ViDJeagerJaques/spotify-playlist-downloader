@@ -13,6 +13,20 @@ from typing import Any, Dict, Iterable, List
 
 from bs4 import BeautifulSoup, Tag
 
+
+def _lxml_available() -> bool:
+    try:
+        import lxml  # noqa: F401
+
+        return True
+    except Exception:
+        return False  # pragma: no cover
+
+
+# Prefer the fast C-based lxml parser; bs4 falls back to the stdlib
+# html.parser automatically if lxml is not installed, so this never crashes.
+HTML_PARSER = "lxml" if _lxml_available() else "html.parser"
+
 # Regexes tuned to the actual markup of soundloaders.app (July 2026).
 TRACK_LI_RE = re.compile(r"track-list-item|li-item|playlist-song", re.I)
 TITLE_ATTR_RE = re.compile(r"(?:track|song|music)[-_ ]?title|data[-_]title", re.I)
@@ -31,7 +45,7 @@ def parse_track_rows(html: str) -> List[Tag]:
     """
     if not html:
         return []
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, HTML_PARSER)
 
     rows: List[Tag] = []
     seen = set()

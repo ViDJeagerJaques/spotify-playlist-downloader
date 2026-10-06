@@ -32,7 +32,7 @@ from typing import Callable, List, Optional
 
 import requests
 
-from providers.base import ProviderId, ServiceError, Track
+from providers.base import CaptchaRequiredError, ProviderId, ServiceError, Track
 from providers.mock import MockProvider, _mock_mp3_bytes
 
 
@@ -55,6 +55,11 @@ class TrackOutcome:
     title: str = ""
     mp3_url: str = ""
     error: str = ""
+    # Machine-readable failure class for the refresh/retry flow:
+    # "captcha" (token expired/invalid -> retry after user refreshes the
+    # token), "fetch" (MP3 URL resolved but file download failed),
+    # "service" (anything else), "" (no failure / legacy results).
+    error_kind: str = ""
     local_path: Optional[Path] = None
 
 
@@ -106,6 +111,10 @@ class MockDownloadHandler:
             raise ServiceError("mock fetch requires mock:// URL")
 
 
+class _FetchError(Exception):
+    """Internal marker: MP3 URL resolved fine but the file download failed."""
+
+
 class BatchOrchestrator:
     """Run resolve for every track and optionally assemble a local ZIP."""
 
@@ -113,6 +122,36 @@ class BatchOrchestrator:
         self.provider = provider
         self.mode = mode
         self._fetcher: Optional[LocalFileFetcher] = None
+
+    def _ensure_fetcher(self) -> None:
+        if self._fetcher is None:
+            if getattr(self.provider, "provider", None) == ProviderId.MOCK:
+                self._fetcher = MockDownloadHandler()
+            else:
+                self._fetcher = LocalFileFetcher()
+
+    @staticmethod
+    def _arcname(index: int, track: Track) -> str:
+        """Deterministic ZIP entry name, identical across run() and retries."""
+        return _sanitize_component(f"{index+1:02d} - {track.filename}") + ".mp3"
+
+    def _resolve_and_stage(self, index: int, track: Track, cftoken: str,
+                           temp_dir: Optional[Path]) -> str:
+        """Resolve one track and (in ZIP mode) download it into temp_dir.
+
+        Returns the MP3 URL. Raises CaptchaRequiredError when the token was
+        rejected, anything else for service/fetch problems.
+        """
+        mp3_url = self.provider.resolve_track(track, cftoken=cftoken)
+        if temp_dir is not None:
+            self._ensure_fetcher()
+            try:
+                self._fetcher.fetch(mp3_url, temp_dir / self._arcname(index, track))
+            except CaptchaRequiredError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - classify fetch failures
+                raise _FetchError(str(exc)) from exc
+        return mp3_url
 
     def run(self, tracks: List[Track], cftoken: str = "", progress: Optional[ProgressFn] = None,
             pause_secs: float = 0.0) -> BatchResult:
@@ -127,10 +166,7 @@ class BatchOrchestrator:
 
         if cleanup_on_finish:
             temp_dir = Path(tempfile.mkdtemp(prefix="spl_dl_"))
-            if getattr(self.provider, "provider", None) == ProviderId.MOCK:
-                self._fetcher = MockDownloadHandler()
-            else:
-                self._fetcher = LocalFileFetcher()
+            self._ensure_fetcher()
 
         try:
             for i, track in enumerate(tracks):
@@ -139,22 +175,34 @@ class BatchOrchestrator:
                 if progress:
                     progress(i, TrackState.PROCESSING, outcome, "processing")
                 try:
-                    url = self.provider.resolve_track(track, cftoken=cftoken)
+                    url = self._resolve_and_stage(i, track, cftoken, temp_dir)
+                    outcome.mp3_url = url
                     if cleanup_on_finish:
-                        safe = _sanitize_component(f"{i+1:02d} - {track.filename}") + ".mp3"
-                        dest = temp_dir / safe  # temp_dir is set when cleanup_on_finish
-                        self._fetcher.fetch(url, dest)
-                        outcome.mp3_url = url
-                        outcome.local_path = dest
-                    else:
-                        outcome.mp3_url = url
+                        outcome.local_path = temp_dir / self._arcname(i, track)  # type: ignore[union-attr]
                     outcome.state = TrackState.READY
+                    outcome.error = ""
+                    outcome.error_kind = ""
                     result.ok += 1
                     if progress:
                         progress(i, TrackState.READY, outcome, "ready")
+                except CaptchaRequiredError as exc:
+                    outcome.state = TrackState.FAILED
+                    outcome.error = str(exc)
+                    outcome.error_kind = "captcha"
+                    result.failed += 1
+                    if progress:
+                        progress(i, TrackState.FAILED, outcome, "failed")
+                except _FetchError as exc:
+                    outcome.state = TrackState.FAILED
+                    outcome.error = str(exc)
+                    outcome.error_kind = "fetch"
+                    result.failed += 1
+                    if progress:
+                        progress(i, TrackState.FAILED, outcome, "failed")
                 except Exception as exc:  # noqa: BLE001 - surface per-track failures
                     outcome.state = TrackState.FAILED
                     outcome.error = str(exc)
+                    outcome.error_kind = "service"
                     result.failed += 1
                     if progress:
                         progress(i, TrackState.FAILED, outcome, "failed")
@@ -172,12 +220,116 @@ class BatchOrchestrator:
         result.elapsed = time.time() - result.started_at
         return result
 
+    def retry_failed(self, result: BatchResult, tracks: List[Track], cftoken: str = "",
+                     progress: Optional[ProgressFn] = None, pause_secs: float = 1.0,
+                     only_kinds: Optional[tuple] = None) -> dict:
+        """Retry the FAILED outcomes of a previous run with a (fresh) token.
+
+        Used after the user refreshes an expired/single-use CAPTCHA token:
+        only tracks that failed are re-requested, successes are untouched, and
+        newly recovered MP3s are merged into the existing ZIP (STREAM_LOCAL).
+
+        Returns {"retried": n, "recovered": m, "still_failed": k}.
+        """
+        targets = [
+            o for o in result.outcomes
+            if o.state == TrackState.FAILED
+            and (only_kinds is None or o.error_kind in only_kinds)
+            and 0 <= o.index < len(tracks)
+        ]
+        summary = {"retried": len(targets), "recovered": 0, "still_failed": 0}
+        if not targets:
+            return summary
+
+        cleanup_on_finish = self.mode == DownloadMode.STREAM_LOCAL
+        temp_dir: Optional[Path] = Path(tempfile.mkdtemp(prefix="spl_rt_")) if cleanup_on_finish else None
+        if cleanup_on_finish:
+            self._ensure_fetcher()
+
+        try:
+            for outcome in targets:
+                i = outcome.index
+                track = tracks[i]
+                outcome.state = TrackState.PROCESSING
+                outcome.error = ""
+                outcome.error_kind = ""
+                if progress:
+                    progress(i, TrackState.PROCESSING, outcome, "retrying")
+                try:
+                    url = self._resolve_and_stage(i, track, cftoken, temp_dir)
+                    outcome.mp3_url = url
+                    if cleanup_on_finish:
+                        outcome.local_path = temp_dir / self._arcname(i, track)  # type: ignore[union-attr]
+                    outcome.state = TrackState.READY
+                    result.ok += 1
+                    result.failed -= 1
+                    summary["recovered"] += 1
+                    if progress:
+                        progress(i, TrackState.READY, outcome, "ready")
+                except CaptchaRequiredError as exc:
+                    outcome.state = TrackState.FAILED
+                    outcome.error = str(exc)
+                    outcome.error_kind = "captcha"
+                    if progress:
+                        progress(i, TrackState.FAILED, outcome, "failed")
+                except _FetchError as exc:
+                    outcome.state = TrackState.FAILED
+                    outcome.error = str(exc)
+                    outcome.error_kind = "fetch"
+                    if progress:
+                        progress(i, TrackState.FAILED, outcome, "failed")
+                except Exception as exc:  # noqa: BLE001 - keep going with the rest
+                    outcome.state = TrackState.FAILED
+                    outcome.error = str(exc)
+                    outcome.error_kind = "service"
+                    if progress:
+                        progress(i, TrackState.FAILED, outcome, "failed")
+                if pause_secs:
+                    time.sleep(pause_secs)
+
+            if cleanup_on_finish and temp_dir and summary["recovered"]:
+                staged = sorted(temp_dir.glob("*.mp3"))
+                if result.zip_path is not None and result.zip_path.exists():
+                    result.zip_path = self._merge_into_zip(result.zip_path, staged)
+                elif result.ok:
+                    result.zip_path = self._make_zip(temp_dir)
+        finally:
+            if cleanup_on_finish and temp_dir:
+                self._cleanup_dir(temp_dir)
+
+        summary["still_failed"] = sum(1 for o in result.outcomes if o.state == TrackState.FAILED)
+        result.elapsed = time.time() - result.started_at
+        return summary
+
     def _make_zip(self, folder: Path) -> Path:
         zip_path = Path(tempfile.gettempdir()) / f"spl_{int(time.time()*1000)}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in sorted(folder.glob("*.mp3")):
                 zf.write(f, arcname=f.name)
         return zip_path
+
+    @staticmethod
+    def _merge_into_zip(old_zip: Path, new_files: List[Path]) -> Path:
+        """Return a new ZIP with the old entries plus the newly staged MP3s.
+
+        Old staging folders are deleted after run(), so recovered tracks can
+        only be combined with previous successes by copying the old ZIP.
+        The old file is removed (best effort) after the merge succeeds.
+        """
+        merged = Path(tempfile.gettempdir()) / f"spl_{int(time.time()*1000)}_r.zip"
+        with zipfile.ZipFile(old_zip) as zin:
+            old_names = set(zin.namelist())
+            with zipfile.ZipFile(merged, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    zout.writestr(item, zin.read(item.filename))
+                for f in new_files:
+                    if f.name not in old_names:  # same arcname scheme -> skip dupes
+                        zout.write(f, arcname=f.name)
+        try:
+            old_zip.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return merged
 
     @staticmethod
     def _cleanup_dir(folder: Path) -> None:

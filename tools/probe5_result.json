@@ -1,0 +1,9 @@
+{
+  "console": [
+    "[warning] <meta name=\"apple-mobile-web-app-capable\" content=\"yes\"> is deprecated. Please include <meta name=\"mobile-web-app-capable\" content=\"yes\">",
+    "[log] loading turnstile...",
+    "[warning] [Cloudflare Turnstile] Turnstile already has been loaded. Was Turnstile imported multiple times?",
+    "[log] turnstile loaded!",
+    "[error] Search error! TypeError: Cannot read properties of undefined (reading 'render')\n    at https://spotidown.co/main.js?v=1789115042673:1:32157\n    at new Promise (<anonymous>)\n    at E (https://spotidown.co/main.js?v=1789115042673:1:32111)\n    at async "
+  ]
+}

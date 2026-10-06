@@ -80,6 +80,7 @@ class SoundLoadersClient:
 
     def load_tracks(self, spotify_url: str, cftoken: str = "") -> ResolveResult:
         """POST /action with {url, cftoken} and parse the track list HTML."""
+        cftoken = (cftoken or "").strip()
         self._open_session()
         s = self._session
         payload = self._post_form(s, "/action", {"url": spotify_url, "cftoken": cftoken or ""})
@@ -103,19 +104,20 @@ class SoundLoadersClient:
 
     def resolve_track(self, track: Track, cftoken: str = "") -> str:
         """POST /action/tracks with the row's data + track_token -> MP3 URL."""
+        cftoken = (cftoken or "").strip()
         if not self._session:
             self._open_session()
         payload = self._post_form(
             self._session,
             "/action/tracks",
-            {"data": track.data, "track_token": track.track_token},
+            {"data": track.data, "track_token": track.track_token, "cftoken": cftoken},
         )
         if payload.get("status") is False or "html" not in payload:
             err = str(payload.get("error") or "Track resolution failed.")
             if _looks_like_captcha(payload):
                 raise CaptchaRequiredError(
                     "SoundLoaders rejected the request (CAPTCHA / token).",
-                    details=f"Action /action/tracks returned: {err}",
+                    details=f"Action /action/tracks returned: {err} (token_len={len(cftoken)})",
                 )
             raise ServiceError(f"SoundLoaders could not resolve the track: {err}")
 
@@ -135,7 +137,7 @@ class SoundLoadersClient:
         if _looks_like_captcha(payload) or not cftoken:
             raise CaptchaRequiredError(
                 "SoundLoaders requires a valid Cloudflare Turnstile token.",
-                details=f"POST /action returned: {error}",
+                details=f"POST /action returned: {error} (token_len={len(cftoken or '')})",
             )
         raise ServiceError(f"SoundLoaders: {error}")
 

@@ -66,7 +66,13 @@ class CaptchaRequiredError(ServiceError):
     Raised whenever a request has no usable token, or the service says the token
     is wrong/expired. SoundLoaders currently requires Cloudflare Turnstile;
     SpotiDown requires reCAPTCHA v3.
+
+    These tokens are single-use and short-lived, so this error is retryable:
+    the user solves the CAPTCHA again for a fresh token and the failed action
+    is retried (see BatchOrchestrator.retry_failed).
     """
+
+    retryable_after_refresh = True
 
 
 def _slug(text: str, max_len: int = 120) -> str:

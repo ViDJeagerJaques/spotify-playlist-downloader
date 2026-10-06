@@ -42,6 +42,24 @@ tests/
   test_app.py                end-to-end Streamlit AppTest memakai Mock provider
 ```
 
+### Dependencies
+
+Tercantum di `requirements.txt`:
+
+- `streamlit` — web UI
+- `requests` — HTTP client ke SoundLoaders / SpotiDown
+- `beautifulsoup4` — parsing HTML respon provider
+- `lxml` — parser HTML cepat untuk BeautifulSoup (jika tidak terpasang, kode
+  otomatis fallback ke `html.parser` bawaan Python)
+- `jinja2` — dependency ekosistem Streamlit, dicantumkan eksplisit agar versi
+  konsisten
+
+Install:
+
+```powershell
+pip install -r requirements.txt
+```
+
 ### Di mana ketergantungan ke SoundLoaders/SpotiDown berada
 
 Tepat di `providers/soundloaders.py` dan `providers/spotidown.py` (baca
@@ -58,7 +76,7 @@ docstring `DEPENDENCY NOTE` di sana). Alurnya:
 
 ### Kenapa ada kolom "Token CAPTCHA" (BYO token)
 
-Verifikasi nyata (Juli 2026):
+Verifikasi nyata (diperbarui):
 
 - SoundLoaders kini memakai **Cloudflare Turnstile** (sitekey ada di halamannya).
   Route lama `POST /api/userverify` — yang ada di PRD — sudah **404** (kode
@@ -71,11 +89,62 @@ Verifikasi nyata (Juli 2026):
 Token captcha hanya bisa dibuat widget captcha di browser asli — tidak ada API
 server-side murni yang sah. Karena itu app ini **tidak auto-solve**; sidebar
 menyediakan kolom token opsional (BYO) plus **snippet console (F12)** untuk
-mengambil token dari browser Anda, sesuai pola `cftoken` yang dipakai `script.js`
-SoundLoaders dan `grecaptcha.execute(...)` di SpotiDown.
+mengambil token dari browser Anda.
 
-Jika token tidak diisi dan layanan menolak, app menampilkan pesan error yang
-jelas (bukan crash) dan menyarankan langkah berikutnya.
+#### Cara mengambil token CAPTCHA (BYO flow yang benar)
+
+> ⚠️ Token Turnstile/reCAPTCHA **hanya berlaku SATU KALI & ±5 menit**
+> (aturan Cloudflare/Google). Sekali token dikirim ke situsnya, token itu
+> hangus untuk app (`timeout-or-duplicate`). Snippet di app ini **tidak pernah
+> auto-submit form** (itu penyebab redirect anti-bot dulu).
+
+**SoundLoaders (Turnstile):**
+1. Buka `https://soundloaders.app/` di Chrome/Edge. **JANGAN klik Download
+   di situs itu** — itu memakai tokennya duluan sebelum app sempat pakai.
+2. Tekan `F12` → tab **Console**.
+3. Tempel **snippet Turnstile** (ada di app: sidebar → *Cara ambil token*) →
+   `Enter`. Snippet me-reset widget untuk menerbitkan token fresh, lalu
+   menunggu (maks 60 dtk). Kalau situs melempar ke halaman anti-bot, kembali
+   ke `soundloaders.app` lalu ulangi.
+4. **Selesaikan centang Turnstile** yang muncul. Token fresh otomatis
+   **tersalin ke clipboard** & tercetak dengan label `SOUNDLOADERS_TOKEN`.
+5. Tempel token itu ke kolom **Token CAPTCHA** di sidebar app ini → klik
+   **Proses / Tampilkan Daftar Lagu** dalam ±5 menit. Jangan klik Download
+   di situs sesudah copy.
+
+**SpotiDown (reCAPTCHA v3):**
+1. Buka `https://spotidown.app/` di browser.
+2. Tempel URL Spotify Anda di situs itu, klik **Download** sekali (biarkan
+   prosesnya) — ini mengaktifkan reCAPTCHA v3 + cookie sesi.
+3. Tekan `F12` → tab **Console** → jalankan **snippet reCAPTCHA** → `Enter`.
+4. Token tercopy ke clipboard & tercetak dengan label `SPOTIDOWN_TOKEN`.
+5. Tempel ke kolom **Token CAPTCHA** di sidebar → klik **Proses**.
+
+Catatan penting:
+- Token **single-use & kedaluwarsa ±5 menit**, terikat sesi browser Anda —
+  langsung gunakan sebelum kedaluwarsa, dan jangan kirim token yang sama
+  ke situsnya dulu.
+- Kalau token kosong/salah/kedaluwarsa, app **tidak crash**: muncul pesan merah
+  "CAPTCHA / token diperlukan" plus detail error dari service (termasuk
+  `token_len` yang terkirim, untuk memastikan token kepotong atau tidak).
+- Tidak ada jaminan layanan menerima request server-side walau token valid
+  (mereka bisa cek IP/cookie tambahan).
+
+#### Kalau token mati di tengah jalan (refresh/retry)
+
+Satu token untuk menampilkan daftar lagu bisa expired saat lagu ke-N
+di-download (halaman/aksi baru = token baru). App menangani ini tanpa
+mengulang dari awal:
+
+1. Tiap lagu yang gagal dicatat jenisnya: `[token]` (captcha expired/invalid),
+   `[fetch]` (MP3 ketemu tapi file gagal diunduh), `[service]` (lainnya).
+2. Sidebar menampilkan **umur token** ("fresh" vs "kemungkinan KEDALUWARSA
+   (>4 mnt)") supaya jelas kapan harus ambil baru.
+3. Selama hasil batch masih ada yang gagal, muncul panel **"Retry N gagal
+   dengan token baru"**: solve CAPTCHA lagi → tempel token fresh di sidebar
+   → klik retry. Hanya lagu gagal yang di-request ulang (sesi/cookie yang
+   sama dipakai ulang supaya `track_token` tetap valid), dan MP3 yang pulih
+   **digabung ke ZIP yang sudah ada** (`BatchOrchestrator.retry_failed`).
 
 ### Risiko / kapan app ini berhenti bekerja
 
@@ -104,3 +173,10 @@ Tampil juga di UI (expander "Disclaimer & Catatan Legal"):
 - Mengunduh musik dari Spotify lewat alat pihak ketiga **dapat melanggar** ToS
   Spotify maupun layanan tsb — periksa hukum setempat Anda.
 - Tanggung jawab penggunaan ada pada pengguna.
+
+## Test
+
+```powershell
+.venv\Scripts\python.exe tests\smoke.py       # unit fungsional (offline)
+.venv\Scripts\python.exe tests\test_app.py    # end-to-end UI (Mock provider)
+```

@@ -1,0 +1,10 @@
+{
+  "captured": [],
+  "console": [
+    "[error] Failed to load resource: net::ERR_CACHE_READ_FAILURE",
+    "[error] Failed to load resource: net::ERR_CACHE_READ_FAILURE",
+    "[error] Failed to load resource: net::ERR_CACHE_READ_FAILURE",
+    "[error] Failed to load resource: net::ERR_CACHE_READ_FAILURE",
+    "[warning] <meta name=\"apple-mobile-web-app-capable\" content=\"yes\"> is deprecated. Please include <meta name=\"mobile-web-app-capable\" content=\"yes\">"
+  ]
+}

@@ -33,6 +33,7 @@ from bs4 import BeautifulSoup
 
 from .base import CaptchaRequiredError, ProviderId, ResolveResult, ServiceError, Track
 from .parsing import (
+    HTML_PARSER,
     _clean,
     decode_track_data,
     first_mp3_link,
@@ -64,7 +65,7 @@ class SpotiDownClient:
         s = self._get_session()
         r = s.get(BASE_URL + "/", timeout=self._timeout)
         r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(r.text, HTML_PARSER)
         inp = soup.find("input", {"name": "_uMihH"})
         self._anti_csrf = (inp.get("value") or "") if inp else ""
         return s
@@ -77,6 +78,7 @@ class SpotiDownClient:
 
     def load_tracks(self, spotify_url: str, cftoken: str = "") -> ResolveResult:
         """POST /action and parse the returned track rows (same flow as site)."""
+        cftoken = (cftoken or "").strip()
         self._open_session()
         if not self._anti_csrf:
             raise ServiceError(
@@ -115,6 +117,7 @@ class SpotiDownClient:
 
     def resolve_track(self, track: Track, cftoken: str = "") -> str:
         """POST /action/track with the full serialized track form -> MP3 URL."""
+        cftoken = (cftoken or "").strip()
         if not self._session or not self._anti_csrf:
             self._open_session()
         form_data = {
@@ -144,7 +147,7 @@ class SpotiDownClient:
         if errorcode == "error_token" or not cftoken:
             raise CaptchaRequiredError(
                 "SpotiDown requires a valid reCAPTCHA v3 token.",
-                details=f"POST /action -> {message} (errorcode={errorcode})",
+                details=f"POST /action -> {message} (errorcode={errorcode}, token_len={len(cftoken or '')})",
             )
         raise ServiceError(f"SpotiDown: {message}")
 
@@ -159,7 +162,7 @@ class SpotiDownClient:
 
     def _guess_title(self, html: str) -> str:
         """Grab a plausible title from the track-list page (e.g. an <h3>)."""
-        soup = BeautifulSoup(html or "", "html.parser")
+        soup = BeautifulSoup(html or "", HTML_PARSER)
         for h in soup.find_all(["h1", "h2", "h3"]):
             text = _clean(h.get_text(" ", strip=True))
             if text:
