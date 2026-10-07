@@ -13,7 +13,9 @@ No premium gate, upgrade prompt or paywall exists anywhere in this app.
 """
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 
 import requests
 import streamlit as st
@@ -27,18 +29,26 @@ from core.orchestrator import (
     TrackState,
     make_provider,
 )
-from providers.base import CaptchaRequiredError, ProviderId, ServiceError, Track
+from providers.base import (
+    CaptchaRequiredError,
+    ProviderId,
+    ResolveResult,
+    ServiceError,
+    Track,
+)
 from providers.mock import _mock_mp3_bytes
 
 # TAHAP UI (mock only): struktur UI + navigasi memakai dummy data.
 # providers/* dan core/* diimpor dan dipertahankan apa adanya (tidak diubah
 # pada tahap ini); download asli akan disambung kembali di tahap berikutnya.
+from ui import data as ui_data
 from ui import dummy as ui_dummy
 
 # ---------------------------------------------------------------- constants
 PROVIDER_CHOICES = {
+    ProviderId.SPOTIDOWN_CO.value: "SpotiDown.co (Chrome, tanpa CAPTCHA manual)",
     ProviderId.SOUNDLOADERS.value: "SoundLoaders (utama / primary)",
-    ProviderId.SPOTIDOWN.value: "SpotiDown (cadangan / fallback)",
+    ProviderId.SPOTIDOWN.value: "SpotiDown.app (cadangan / fallback)",
     ProviderId.MOCK.value: "Demo (Mock, offline)",
 }
 DEMO_URL = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
@@ -116,16 +126,21 @@ def init_state() -> None:
         "batch": None,      # BatchResult of the last batch run
         "history": [],      # one dict per finished action (batch / single)
         "lang": "id",
-        "backend": ProviderId.SOUNDLOADERS.value,
+        "backend": ProviderId.SPOTIDOWN_CO.value,
         "download_mode": DownloadMode.STREAM_LOCAL.value,
         "captcha_token": "",
         "provider_obj": None,  # provider client reused so listing + resolve share one session/cookie
-        # ---- TAHAP UI (mock only, sesi navigasi + dummy playlist) ----
-        "page": "home",            # home | playlist | songs | covers | backup
-        "playlist_url": "",        # link Spotify dari Home, dipakai semua halaman
-        "dummy_playlist": None,    # dict dari ui/dummy.get_dummy_playlist
-        "selected_songs": set(),   # set track id yang dicentang di Download Lagu
-        "selected_covers": set(),  # set track id yang dicentang di Download Cover
+        # ---- TAHAP UI: navigasi + playlist asli (spotiDown.co) ----
+        "page": "home",              # home | playlist | songs | covers | backup
+        "playlist_url": "",          # link Spotify dari Home, dipakai semua halaman
+        "playlist_view": None,       # dict hasil ui_data.playlist_view()
+        "real_tracks": [],           # list[Track] asli (punya mp3_url + thumbnail)
+        "ui_batch": None,            # BatchResult terakhir
+        "ui_batch_label": "",        # label batch terakhir (mis. "Part 1")
+        "ui_batch_tracks": [],       # Track[] yang jadi target batch terakhir
+        "cover_zip": None,           # Path ZIP cover terakhir
+        "selected_songs": set(),     # set track id yang dicentang di Download Lagu
+        "selected_covers": set(),    # set track id yang dicentang di Download Cover
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -266,7 +281,7 @@ def _show_token_help(lang: str) -> None:
         st.markdown(f"**{L('help_token.note_title')}:** {L('help_token.note_body')}")
 
 
-# ------------------------------------------------- TAHAP UI: navigasi (mock)
+# ------------------------------------------------- TAHAP UI: navigasi
 PAGES = {
     "home": "Home",
     "playlist": "Download Playlist",
@@ -277,8 +292,12 @@ PAGES = {
 
 
 def sidebar_nav() -> None:
-    """Sidebar navigasi tahap UI. Backend asli tetap ada (tidak dihapus),
-    hanya disembunyikan di expander agar tidak dipakai pada tahap mock ini."""
+    """Sidebar: navigasi halaman + pemilih backend.
+
+    Backend asli (SoundLoaders / SpotiDown.app) TIDAK dihapus — semuanya masih
+    bisa dipilih sebagai cadangan. SpotiDown.co adalah default karena dua
+    provider lama butuh token CAPTCHA yang terikat session browser.
+    """
     with st.sidebar:
         st.header("Navigasi")
         current = st.session_state.get("page", "home")
@@ -297,19 +316,53 @@ def sidebar_nav() -> None:
         if choice != current:
             st.session_state.page = choice
             st.rerun()
+
+        st.divider()
+        st.subheader("Backend")
+        keys = list(PROVIDER_CHOICES.keys())
+        backend = st.selectbox(
+            "Backend service",
+            keys,
+            format_func=lambda k: PROVIDER_CHOICES[k],
+            index=keys.index(st.session_state.backend) if st.session_state.backend in keys else 0,
+        )
+        if backend != st.session_state.backend:
+            # Backend switched -> previously loaded tracks came from another
+            # service, and their short-lived MP3 links are not reusable.
+            st.session_state.backend = backend
+            st.session_state.provider_obj = None
+            _reset_playlist_state()
+            st.rerun()
+        if backend == ProviderId.SPOTIDOWN_CO.value:
+            st.caption("Chrome akan terbuka di layar. Jangan ditutup / minimize "
+                       "saat proses berjalan.")
+
         st.divider()
         if st.session_state.get("playlist_url"):
             st.caption("Playlist sesi ini:")
             st.code(st.session_state.playlist_url, language=None)
         else:
             st.caption("Belum ada playlist dimuat.")
-        with st.expander("Backend asli (nonaktif tahap UI)"):
-            st.caption(
-                "Provider/API/scraping/Spotify/Cloudflare/CAPTCHA/download asli "
-                "dipertahankan di `providers/*` + `core/*` dan tidak dipakai "
-                "pada tahap mock ini."
-            )
-            st.caption(f"Backend tersimpan: `{st.session_state.get('backend')}`")
+        if st.session_state.get("playlist_url") and st.button("Ganti playlist", use_container_width=True):
+            _reset_playlist_state()
+            _go("home")
+
+
+def _reset_playlist_state() -> None:
+    """Buang playlist + hasil unduhan lama (link MP3 juga kedaluwarsa cepat)."""
+    cleanup_batch(None, st.session_state.get("ui_batch").zip_path
+                  if st.session_state.get("ui_batch") else None)
+    cleanup_batch(None, st.session_state.get("cover_zip"))
+    st.session_state.playlist_url = ""
+    st.session_state.playlist_view = None
+    st.session_state.real_tracks = []
+    st.session_state.ui_batch = None
+    st.session_state.ui_batch_label = ""
+    st.session_state.ui_batch_tracks = []
+    st.session_state.cover_zip = None
+    st.session_state.selected_songs = set()
+    st.session_state.selected_covers = set()
+    st.session_state.provider_obj = None
 
 
 def main() -> None:
@@ -341,24 +394,179 @@ def _go(page: str) -> None:
 
 
 def _playlist_or_notice():
-    """Kembalikan dummy_playlist, atau tampilkan peringatan + tombol ke Home."""
-    pl = st.session_state.get("dummy_playlist")
-    if pl:
-        return pl
+    """Kembalikan playlist_view, atau tampilkan peringatan + tombol ke Home."""
+    view = st.session_state.get("playlist_view")
+    if view:
+        return view
     st.warning("Belum ada playlist dimuat. Masukkan link Spotify di Home dulu.")
     if st.button("← Ke Home", type="primary"):
         _go("home")
     return None
 
 
+def _load_playlist(url: str) -> None:
+    """Muat playlist lewat provider aktif (atau dummy bila backend Demo)."""
+    backend = st.session_state.backend
+    if backend == ProviderId.MOCK.value:
+        dummy = ui_dummy.get_dummy_playlist(url)
+        tracks = []
+        for t in dummy["tracks"]:
+            tracks.append(Track(data=t["id"], track_token=t["id"], title=t["title"],
+                                artist=t["artist"], thumbnail=t["cover"], mp3_url=None))
+        st.session_state.real_tracks = tracks
+        st.session_state.playlist_view = ui_data.playlist_view(
+            _mock_result(dummy["title"], url, tracks))
+        return
+
+    provider = _get_provider()
+    note = "Membuka Chrome… jangan tutup/minimize jendela Chrome yang muncul." \
+        if backend == ProviderId.SPOTIDOWN_CO.value else "Menghubungi layanan…"
+    with st.spinner(note, show_time=True):
+        result = provider.load_tracks(url)
+    st.session_state.real_tracks = result.tracks
+    st.session_state.playlist_view = ui_data.playlist_view(result)
+
+
+def _mock_result(title: str, url: str, tracks: list) -> ResolveResult:
+    return ResolveResult(title=title, source_url=url, tracks=tracks)
+
+
+def _tracks_by_id() -> dict:
+    out = {}
+    for t in st.session_state.get("real_tracks", []):
+        out[t.track_token or t.data or t.title] = t
+    return out
+
+
+# NOTE: the name is deliberately distinct from the legacy `_run_batch()` below,
+# which the legacy flow still owns.
+def _run_ui_batch(tracks: list, label: str) -> BatchResult:
+    """Jalankan batch download (STREAM_LOCAL -> ZIP) dengan progress di UI."""
+    provider = _get_provider()
+    orch = BatchOrchestrator(provider, mode=DownloadMode.STREAM_LOCAL)
+    bar = st.progress(0.0, text="Mulai…")
+    status = st.empty()
+
+    def progress(i, state, outcome, message):
+        total = len(tracks) or 1
+        bar.progress(min((i + 1) / total, 1.0), text=f"{i + 1}/{len(tracks)}")
+        status.caption(f"[{i + 1}/{len(tracks)}] {outcome.title or ''} — {state.value}")
+
+    # No pause between tracks: downloads run serially, which keeps us far below
+    # the parallel load that makes the CDN reject requests (Jebakan 3).
+    result = orch.run(tracks, cftoken="", progress=progress, pause_secs=0.0)
+
+    previous = st.session_state.get("ui_batch")
+    if previous is not None and previous.zip_path:
+        cleanup_batch(None, previous.zip_path)
+    st.session_state.ui_batch = result
+    st.session_state.ui_batch_label = label
+    st.session_state.ui_batch_tracks = list(tracks)
+    status.empty()
+    return result
+
+
+def _render_ui_batch_result() -> None:
+    """Tampilkan hasil batch terakhir + tombol ZIP + panel retry."""
+    result = st.session_state.get("ui_batch")
+    if result is None:
+        return
+    label = st.session_state.get("ui_batch_label") or "Batch"
+    st.divider()
+    st.subheader(f"Hasil: {label}")
+    if result.failed:
+        st.warning(f"{result.ok}/{result.total} berhasil, {result.failed} gagal — {result.summary}")
+    else:
+        st.success(f"{result.ok}/{result.total} berhasil — {result.summary}")
+
+    if result.zip_path and result.zip_path.exists():
+        try:
+            st.download_button(
+                "Download ZIP",
+                data=result.zip_path.read_bytes(),
+                file_name=result.zip_path.name,
+                mime="application/zip",
+                use_container_width=True,
+                key="zip_dl",
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Gagal membaca ZIP: {exc}")
+
+    failed = [o for o in result.outcomes if o.state == TrackState.FAILED]
+    if failed:
+        with st.expander(f"{len(failed)} lagu gagal — detail"):
+            for o in failed:
+                st.markdown(f"- {o.index + 1:02d}. {o.title}: {o.error}")
+        if st.button(f"Ulangi {len(failed)} lagu gagal", key="ui_retry"):
+            tracks = st.session_state.get("ui_batch_tracks") or []
+            orch = BatchOrchestrator(_get_provider(), mode=DownloadMode.STREAM_LOCAL)
+            bar = st.progress(0.0, text="Retry…")
+
+            def rprogress(i, state, outcome, message):
+                bar.progress(min((i + 1) / max(1, len(failed)), 1.0),
+                             text=f"{i + 1}/{len(failed)}")
+            summary = orch.retry_failed(result, tracks, cftoken="",
+                                        progress=rprogress, pause_secs=0.0)
+            st.info(f"Retry selesai: {summary['recovered']} pulih, "
+                    f"{summary['still_failed']} masih gagal.")
+            if summary["still_failed"]:
+                st.caption("Penyebab paling umum: link MP3 dari spotidown.co "
+                           "kedaluwarsa (butuh ±10 menit). Muat ulang playlist di "
+                           "Home untuk dapat link baru, lalu ulangi.")
+            st.rerun()
+
+
+def _fetch_mp3_bytes(track: Track) -> bytes:
+    """Ambil satu file MP3 ke memory (untuk tombol unduh per kartu)."""
+    provider = _get_provider()
+    url = track.mp3_url or provider.resolve_track(track, cftoken="")
+    headers = getattr(provider, "download_headers", None)
+    hdrs = headers() if callable(headers) else {}
+    with requests.get(url, timeout=180, allow_redirects=True, headers=hdrs) as r:
+        r.raise_for_status()
+        return r.content
+
+
+def _build_cover_zip(tracks: list) -> Path:
+    """Download cover terpilih lalu kumpulkan jadi satu ZIP."""
+    import tempfile
+    import zipfile
+
+    staging = Path(tempfile.mkdtemp(prefix="spl_cover_"))
+    headers = {"User-Agent": ui_data.download_headers().get("User-Agent", "")}
+    ok = 0
+    for t in tracks:
+        if not t.thumbnail:
+            continue
+        try:
+            with requests.get(t.thumbnail, timeout=60, headers=headers) as r:
+                r.raise_for_status()
+                (staging / f"{t.filename}.jpg").write_bytes(r.content)
+            ok += 1
+        except Exception:  # noqa: BLE001 - skip covers that fail
+            continue
+    zip_path = Path(tempfile.gettempdir()) / f"spl_cover_{int(time.time()*1000)}.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(staging.glob("*.jpg")):
+            zf.write(f, arcname=f.name)
+    try:
+        staging.rmdir()
+    except Exception:  # noqa: BLE001
+        pass
+    st.session_state.cover_count = ok
+    return zip_path
+
+
 def page_home() -> None:
     st.title("Spotify Playlist Downloader")
-    st.caption("Tahap UI (mock) — tempel link sekali, dipakai semua halaman selama sesi.")
+    st.caption("Tempel link sekali di Home — semua halaman memakai playlist "
+               "yang sama selama sesi.")
 
-    url_default = st.session_state.get("playlist_url", "")
+    # Only a widget key here: passing `value=` together with `key=` makes
+    # Streamlit ignore the value, so the widget keeps its own state instead.
     url = st.text_input(
         "Spotify playlist URL",
-        value=url_default,
+        key="home_url_input",
         placeholder="https://open.spotify.com/playlist/...",
     )
     if st.button("Load Playlist", type="primary", use_container_width=True):
@@ -366,31 +574,46 @@ def page_home() -> None:
         if not url:
             st.warning("Tempel link playlist Spotify dulu.")
         else:
-            # TAHAP UI: tidak fetch provider apa pun, hanya dummy.
+            _reset_playlist_state()
             st.session_state.playlist_url = url
-            st.session_state.dummy_playlist = ui_dummy.get_dummy_playlist(url)
-            st.session_state.selected_songs = set()
-            st.session_state.selected_covers = set()
-            st.success(f"Playlist (dummy) dimuat: {len(st.session_state.dummy_playlist['tracks'])} lagu.")
-            st.rerun()
+            try:
+                _load_playlist(url)
+                st.rerun()
+            except CaptchaRequiredError as exc:
+                render_errors(exc)
+            except ServiceError as exc:
+                st.error(exc.user_message)
+                with st.expander("Detail teknis"):
+                    st.code(exc.details or "", language=None)
+            except Exception as exc:  # noqa: BLE001 - never crash the page
+                st.error(f"Gagal memuat playlist: {type(exc).__name__}: {exc}")
 
-    pl = st.session_state.get("dummy_playlist")
-    if not pl:
-        st.info("Setelah Load ditekan, info playlist + 4 menu akan muncul di sini.")
+    view = st.session_state.get("playlist_view")
+    if not view:
+        st.info("Klik **Load Playlist** untuk memuat daftar lagu. "
+                "SpotiDown.co membuka jendela Chrome untuk solving CAPTCHA-nya "
+                "sendiri — biarkan jendela itu terbuka.")
         return
+
+    tracks = view["tracks"]
+    if view.get("hint"):
+        st.warning(view["hint"])
 
     st.divider()
     c1, c2 = st.columns([1, 3])
     with c1:
-        try:
-            st.image(pl["cover"], width=220)
-        except Exception:
-            st.write("")
+        cover = next((t["cover"] for t in tracks if t.get("cover")), "")
+        if cover:
+            try:
+                st.image(cover, width=220)
+            except Exception:  # noqa: BLE001
+                st.write("")
     with c2:
-        st.subheader(pl["title"])
-        st.caption(f"Owner: {pl['owner']} • {len(pl['tracks'])} lagu (dummy)")
-        st.caption(f"Sumber: `{pl['url']}`")
-        st.caption(pl["description"])
+        st.subheader(view["title"])
+        st.caption(f"{len(tracks)} lagu • batas free tier {ui_data.BATCH_LIMIT} track/playlist")
+        st.caption(f"Sumber: `{view['url']}`")
+        with_mp3 = sum(1 for t in tracks if t.get("mp3_url"))
+        st.caption(f"{with_mp3}/{len(tracks)} lagu punya link MP3 dari layanan.")
 
     st.divider()
     st.subheader("Pilih aksi")
@@ -399,54 +622,69 @@ def page_home() -> None:
     with r1c1:
         with st.container(border=True):
             st.markdown("**1. Download Playlist**")
-            st.caption("Satu batch (≤15) atau beberapa Part (maks 15/Part). Mock.")
+            st.caption(f"Batch per Part (maks {ui_data.BATCH_LIMIT} lagu/Part) → ZIP.")
             if st.button("Buka →", key="nav_playlist", use_container_width=True):
                 _go("playlist")
     with r1c2:
         with st.container(border=True):
             st.markdown("**2. Download Lagu**")
-            st.caption("Grid card + search + pilih beberapa lagu. Mock.")
+            st.caption("Grid card + search + pilih beberapa lagu.")
             if st.button("Buka →", key="nav_songs", use_container_width=True):
                 _go("songs")
     with r2c1:
         with st.container(border=True):
             st.markdown("**3. Download Song Cover**")
-            st.caption("Grid cover + search + pilih beberapa cover. Mock.")
+            st.caption("Grid cover + search + pilih beberapa cover → ZIP gambar.")
             if st.button("Buka →", key="nav_covers", use_container_width=True):
                 _go("covers")
     with r2c2:
         with st.container(border=True):
             st.markdown("**4. Backup**")
-            st.caption("Pilihan format TXT / JSON / CSV. Mock.")
+            st.caption("Export metadata TXT / JSON / CSV.")
             if st.button("Buka →", key="nav_backup", use_container_width=True):
                 _go("backup")
 
 
 def page_playlist() -> None:
     st.title("Download Playlist")
-    pl = _playlist_or_notice()
-    if not pl:
+    view = _playlist_or_notice()
+    if not view:
         return
-    tracks = pl["tracks"]
-    st.caption(f"{pl['title']} • {len(tracks)} lagu (dummy) • sumber: `{pl['url']}`")
-    parts = ui_dummy.chunk_parts(tracks, ui_dummy.BATCH_LIMIT)
+    rows = view["tracks"]
+    st.caption(f"{view['title']} • {len(rows)} lagu • sumber: `{view['url']}`")
+    if view.get("hint"):
+        st.warning(view["hint"])
 
-    if len(tracks) <= ui_dummy.BATCH_LIMIT:
-        st.success(f"Satu batch: {len(tracks)} lagu (≤ {ui_dummy.BATCH_LIMIT}). Download asli belum aktif.")
-        with st.container(border=True):
-            for i, t in enumerate(tracks, 1):
-                st.markdown(f"{i:02d}. **{t['title']}** — {t['artist']} `({t['duration']})`")
-            if st.button(f"Download Batch (Mock, {len(tracks)} lagu)", type="primary"):
-                st.info("Mock: batch tidak menjalankan download asli pada tahap UI ini.")
+    by_id = _tracks_by_id()
+    parts = ui_data.chunk_parts(rows, ui_data.BATCH_LIMIT)
+
+    if len(rows) <= ui_data.BATCH_LIMIT:
+        st.success(f"Satu batch: {len(rows)} lagu "
+                   f"(≤ batas free tier {ui_data.BATCH_LIMIT}).")
     else:
-        st.info(f"{len(tracks)} lagu dibagi menjadi {len(parts)} Part (maks {ui_dummy.BATCH_LIMIT} lagu/Part). Download asli belum aktif.")
-        for p_idx, part in enumerate(parts, 1):
-            with st.expander(f"Part {p_idx} — {len(part)} lagu", expanded=(p_idx == 1)):
-                for j, t in enumerate(part, 1):
-                    n = (p_idx - 1) * ui_dummy.BATCH_LIMIT + j
-                    st.markdown(f"{n:02d}. **{t['title']}** — {t['artist']} `({t['duration']})`")
-                if st.button(f"Download Part {p_idx} (Mock)", key=f"mock_part_{p_idx}"):
-                    st.info(f"Mock: Part {p_idx} tidak menjalankan download asli pada tahap ini.")
+        st.info(f"{len(rows)} lagu dibagi menjadi {len(parts)} Part "
+                f"(maks {ui_data.BATCH_LIMIT} lagu/Part).")
+
+    for p_idx, part in enumerate(parts, 1):
+        head = f"Part {p_idx} — {len(part)} lagu"
+        with st.expander(head, expanded=(p_idx == 1)):
+            for j, t in enumerate(part, 1):
+                n = (p_idx - 1) * ui_data.BATCH_LIMIT + j
+                line = f"{n:02d}. **{t['title']}** — {t['artist']}"
+                if t.get("duration"):
+                    line += f" `({t['duration']})`"
+                if not t.get("mp3_url") and st.session_state.backend != ProviderId.MOCK.value:
+                    line += " ⚠️ tanpa link MP3"
+                st.markdown(line)
+            targets = [by_id[t["id"]] for t in part if t["id"] in by_id]
+            if st.button(f"Download {head} → ZIP", key=f"dl_part_{p_idx}",
+                         type="primary" if p_idx == 1 else "secondary",
+                         disabled=not targets):
+                with st.spinner("Mengunduh…"):
+                    _run_ui_batch(targets, head)
+                st.rerun()
+
+    _render_ui_batch_result()
 
 
 def _grid_select_state(key_set: str, ids: list[str]) -> set:
@@ -459,20 +697,25 @@ def _grid_select_state(key_set: str, ids: list[str]) -> set:
 
 def page_songs() -> None:
     st.title("Download Lagu")
-    pl = _playlist_or_notice()
-    if not pl:
+    view = _playlist_or_notice()
+    if not view:
         return
-    tracks = pl["tracks"]
-    st.caption(f"{len(tracks)} lagu (dummy). Centang untuk memilih, download asli belum aktif.")
+    tracks = view["tracks"]
+    st.caption(f"{len(tracks)} lagu. Centang untuk memilih, lalu unduh per lagu "
+               "atau jadi satu ZIP.")
 
-    query = st.text_input("Search lagu / artist…", placeholder="mis. neon, lumen…")
-    shown = ui_dummy.filter_tracks(tracks, query)
+    query = st.text_input("Search lagu / artist / album…", key="song_search",
+                          placeholder="mis. styles, sign of…")
+    shown = ui_data.filter_tracks(tracks, query)
 
     sel = _grid_select_state("selected_songs", [t["id"] for t in tracks])
+    by_id = _tracks_by_id()
     b1, b2, b3 = st.columns([1, 1, 3])
     with b1:
         if st.button("Pilih semua (hasil search)"):
             sel.update(t["id"] for t in shown)
+            for t in shown:
+                st.session_state[f"song_sel_{t['id']}"] = True
             st.rerun()
     with b2:
         if st.button("Bersihkan"):
@@ -483,8 +726,12 @@ def page_songs() -> None:
     with b3:
         st.caption(f"{len(sel)} lagu dipilih • {len(shown)} tampil")
 
-    if st.button(f"Download {len(sel)} Lagu Terpilih (Mock)", type="primary", disabled=(len(sel) == 0)):
-        st.info(f"Mock: {len(sel)} lagu dipilih, download asli belum dijalankan.")
+    if st.button(f"Download {len(sel)} Lagu Terpilih → ZIP", type="primary",
+                 disabled=(len(sel) == 0)):
+        targets = [by_id[i] for i in sel if i in by_id]
+        with st.spinner("Mengunduh lagu terpilih…"):
+            _run_ui_batch(targets, f"{len(targets)} lagu terpilih")
+        st.rerun()
 
     st.divider()
     cols_per_row = 3
@@ -493,37 +740,66 @@ def page_songs() -> None:
         for col, t in zip(cols, shown[i:i + cols_per_row]):
             with col:
                 with st.container(border=True):
-                    try:
-                        st.image(t["cover"], use_container_width=True)
-                    except Exception:
-                        pass
+                    if t.get("cover"):
+                        try:
+                            st.image(t["cover"], use_container_width=True)
+                        except Exception:  # noqa: BLE001
+                            pass
                     st.markdown(f"**{t['title']}**")
-                    st.caption(f"{t['artist']} • {t['duration']}")
-                    checked = st.checkbox("Pilih", key=f"song_sel_{t['id']}", value=(t["id"] in sel))
+                    meta = t["artist"] + (f" • {t['duration']}" if t.get("duration") else "")
+                    st.caption(meta)
+                    checked = st.checkbox("Pilih", key=f"song_sel_{t['id']}",
+                                          value=(t["id"] in sel))
                     if checked:
                         sel.add(t["id"])
                     else:
                         sel.discard(t["id"])
+
+                    key = f"one_{t['id']}"
+                    if st.button("Unduh 1 lagu", key=key, use_container_width=True,
+                                 disabled=not t.get("mp3_url")
+                                 and st.session_state.backend != ProviderId.MOCK.value):
+                        track = by_id.get(t["id"])
+                        if track is None:
+                            st.warning("Data lagu tidak ditemukan.")
+                        else:
+                            try:
+                                with st.spinner(f"Mengunduh {t['title']}…"):
+                                    data = _fetch_mp3_bytes(track)
+                                st.download_button(
+                                    "Simpan MP3", data=data,
+                                    file_name=f"{track.filename}.mp3",
+                                    mime="audio/mpeg", key=f"dl_{t['id']}",
+                                    use_container_width=True)
+                            except Exception as exc:  # noqa: BLE001
+                                st.error(f"Gagal: {type(exc).__name__}: {exc}")
     if not shown:
         st.caption("Tidak ada lagu yang cocok dengan search.")
 
 
 def page_covers() -> None:
     st.title("Download Song Cover")
-    pl = _playlist_or_notice()
-    if not pl:
+    view = _playlist_or_notice()
+    if not view:
         return
-    tracks = pl["tracks"]
-    st.caption(f"{len(tracks)} cover (dummy). Centang untuk memilih, download asli belum aktif.")
+    tracks = view["tracks"]
+    with_cover = sum(1 for t in tracks if t.get("cover"))
+    st.caption(f"{with_cover}/{len(tracks)} cover tersedia. Centang cover yang "
+               "diinginkan lalu unduh jadi satu ZIP gambar.")
 
-    query = st.text_input("Search cover / lagu / artist…", placeholder="mis. midnight, afterglows…", key="cover_search")
-    shown = ui_dummy.filter_tracks(tracks, query)
+    query = st.text_input("Search cover / lagu / artist…", key="cover_search",
+                          placeholder="mis. midnight, afterglows…")
+    shown = ui_data.filter_tracks(tracks, query)
+    by_id = _tracks_by_id()
 
     sel = _grid_select_state("selected_covers", [t["id"] for t in tracks])
     b1, b2, b3 = st.columns([1, 1, 3])
     with b1:
         if st.button("Pilih semua (hasil search)", key="cover_all"):
-            sel.update(t["id"] for t in shown)
+            sel.update(t["id"] for t in shown if t.get("cover"))
+            for t in shown:
+                if t.get("cover"):
+                    st.session_state[f"cover_sel_{t['id']}"] = True
             st.rerun()
     with b2:
         if st.button("Bersihkan", key="cover_clear"):
@@ -534,8 +810,29 @@ def page_covers() -> None:
     with b3:
         st.caption(f"{len(sel)} cover dipilih • {len(shown)} tampil")
 
-    if st.button(f"Download {len(sel)} Cover Terpilih (Mock)", type="primary", disabled=(len(sel) == 0)):
-        st.info(f"Mock: {len(sel)} cover dipilih, download asli belum dijalankan.")
+    if st.button(f"Download {len(sel)} Cover Terpilih → ZIP", type="primary",
+                 disabled=(len(sel) == 0)):
+        targets = [by_id[i] for i in sel if i in by_id]
+        with st.spinner("Mengunduh cover…"):
+            cleanup_batch(None, st.session_state.get("cover_zip"))
+            zip_path = _build_cover_zip(targets)
+        st.session_state.cover_zip = zip_path
+        ok = st.session_state.get("cover_count", 0)
+        if ok:
+            st.success(f"{ok}/{len(targets)} cover berhasil diunduh.")
+        else:
+            st.warning("Tidak ada cover yang berhasil diunduh (URL mungkin kosong "
+                       "atau ditolak layanan).")
+        st.rerun()
+
+    zip_path = st.session_state.get("cover_zip")
+    if zip_path and Path(zip_path).exists():
+        try:
+            st.download_button("Download ZIP Cover", data=Path(zip_path).read_bytes(),
+                               file_name=Path(zip_path).name, mime="application/zip",
+                               use_container_width=True, key="cover_zip_dl")
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Gagal membaca ZIP cover: {exc}")
 
     st.divider()
     cols_per_row = 4
@@ -544,12 +841,17 @@ def page_covers() -> None:
         for col, t in zip(cols, shown[i:i + cols_per_row]):
             with col:
                 with st.container(border=True):
-                    try:
-                        st.image(t["cover"], use_container_width=True)
-                    except Exception:
-                        pass
+                    if t.get("cover"):
+                        try:
+                            st.image(t["cover"], use_container_width=True)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    else:
+                        st.caption("(tidak ada cover)")
                     st.caption(f"**{t['title']}** — {t['artist']}")
-                    checked = st.checkbox("Pilih cover", key=f"cover_sel_{t['id']}", value=(t["id"] in sel))
+                    checked = st.checkbox("Pilih cover", key=f"cover_sel_{t['id']}",
+                                          value=(t["id"] in sel),
+                                          disabled=not t.get("cover"))
                     if checked:
                         sel.add(t["id"])
                     else:
@@ -560,32 +862,30 @@ def page_covers() -> None:
 
 def page_backup() -> None:
     st.title("Backup")
-    pl = _playlist_or_notice()
-    if not pl:
+    view = _playlist_or_notice()
+    if not view:
         return
-    st.caption("Pilih format backup (mock — file asli belum dibuat pada tahap UI ini).")
+    if view.get("hint"):
+        st.warning(view["hint"])
+    st.caption("Export metadata playlist yang sedang dimuat. Tidak mengunduh "
+               "audio — hanya daftar lagu.")
     fmt = st.radio("Format backup", ["TXT", "JSON", "CSV"], horizontal=True)
 
+    slug = "".join(ch if ch.isalnum() else "_" for ch in (view.get("title") or "playlist"))[:60]
     if fmt == "TXT":
-        st.code(ui_dummy.to_txt_preview(pl), language=None)
+        payload = ui_data.to_txt(view)
+        mime, ext = "text/plain", "txt"
     elif fmt == "CSV":
-        st.code(ui_dummy.to_csv_preview(pl), language=None)
+        payload = ui_data.to_csv(view)
+        mime, ext = "text/csv", "csv"
     else:
-        import json as _json
-        preview = {
-            "title": pl["title"],
-            "source": pl["url"],
-            "total": len(pl["tracks"]),
-            "tracks": [
-                {"no": i, "title": t["title"], "artist": t["artist"], "duration": t["duration"]}
-                for i, t in enumerate(pl["tracks"][:5], 1)
-            ],
-            "_note": f"preview 5 dari {len(pl['tracks'])} lagu (mock)",
-        }
-        st.json(preview)
+        payload = json.dumps(ui_data.to_json_obj(view), indent=2, ensure_ascii=False)
+        mime, ext = "application/json", "json"
 
-    if st.button(f"Buat Backup {fmt} (Mock)", type="primary"):
-        st.info(f"Mock: backup {fmt} tidak membuat file asli pada tahap UI ini.")
+    st.code(payload, language=None)
+    st.download_button(f"Unduh backup {fmt}", data=payload.encode("utf-8"),
+                       file_name=f"{slug}.{ext}", mime=mime,
+                       use_container_width=True, key="backup_dl")
 
 
 # ------------------------------------------------- legacy backend UI (dipertahankan)

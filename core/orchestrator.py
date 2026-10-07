@@ -18,9 +18,19 @@ each row; SpotiDown /action/bulktrack + /action/create_zip). SpotiDown's ZIP
 endpoint is gated (free users get 5 tracks) — see providers/spotidown.py. So the
 app resolves per track with the *free* single-track endpoints and does ZIP
 packaging locally. That keeps the app free of any third-party premium gate.
+
+Provider flavours handled here
+------------------------------
+* **Per-track resolve** (SoundLoaders, SpotiDown.app): every track needs its own
+  request to obtain the MP3 URL.
+* **Prefetched URLs** (spotidown.co): the listing response already contains the
+  MP3 URL for each track, so the orchestrator reuses ``track.mp3_url`` and never
+  calls ``resolve_track()``. Its downloads go through ``ResilientFileFetcher``
+  because that CDN rejects a random share of requests (see that class).
 """
 from __future__ import annotations
 
+import random
 import re
 import tempfile
 import time
@@ -102,6 +112,56 @@ class LocalFileFetcher:
                         fh.write(chunk)
 
 
+class ResilientFileFetcher:
+    """Fetcher for providers whose CDN rejects a random share of requests.
+
+    ``spotidown.co`` hands out ``audio.url`` values that 302-redirect to a CDN
+    (``*.123tokyo.xyz``). That CDN intermittently answers 403/5xx under load, and
+    *which* URLs fail changes on every run — it is not a property of the track.
+    So we retry with a growing delay plus jitter, and skip files that already
+    exist so a re-run only fetches what is missing.
+
+    The provider supplies the required ``Origin``/``Referer``/UA headers (the CDN
+    answers 403 without them) via ``provider.download_headers()``.
+    """
+
+    def __init__(self, headers: Optional[dict] = None, attempts: int = 4,
+                 chunk_size: int = 1 << 16):
+        self._headers = dict(headers or {})
+        self._attempts = max(1, attempts)
+        self._chunk = chunk_size
+
+    def fetch(self, url: str, dest: Path) -> None:
+        if dest.exists() and dest.stat().st_size > 0:
+            return  # already downloaded (re-run after a partial failure)
+
+        last_err = "unknown"
+        for attempt in range(1, self._attempts + 1):
+            if attempt > 1:
+                time.sleep(min(1.5 * attempt, 5) + random.uniform(0, 0.8))
+            try:
+                with requests.get(url, stream=True, timeout=120,
+                                  allow_redirects=True, headers=self._headers) as r:
+                    r.raise_for_status()
+                    with open(dest, "wb") as fh:
+                        for chunk in r.iter_content(chunk_size=self._chunk):
+                            if chunk:
+                                fh.write(chunk)
+                if dest.stat().st_size > 0:
+                    return
+                last_err = "empty response body"
+            except Exception as exc:  # noqa: BLE001 - classified as a fetch failure
+                last_err = str(exc) or repr(exc)
+            # A partial file would be mistaken for a success on the next attempt.
+            try:
+                if dest.exists():
+                    dest.unlink()
+            except Exception:  # noqa: BLE001
+                pass
+
+        raise ServiceError(f"download failed after {self._attempts} attempts: {last_err}")
+
+
 class MockDownloadHandler:
     """Replaces LocalFileFetcher when MockProvider is selected (no network)."""
     def fetch(self, url: str, dest: Path) -> None:
@@ -127,6 +187,17 @@ class BatchOrchestrator:
         if self._fetcher is None:
             if getattr(self.provider, "provider", None) == ProviderId.MOCK:
                 self._fetcher = MockDownloadHandler()
+            elif getattr(self.provider, "prefetched_urls", False):
+                # Provider already handed us the MP3 URL per track, and its CDN
+                # rejects a random share of requests -> retry, correct headers.
+                headers = {}
+                getter = getattr(self.provider, "download_headers", None)
+                if callable(getter):
+                    try:
+                        headers = getter()
+                    except Exception:  # noqa: BLE001 - headers are best-effort
+                        headers = {}
+                self._fetcher = ResilientFileFetcher(headers=headers)
             else:
                 self._fetcher = LocalFileFetcher()
 
@@ -141,8 +212,15 @@ class BatchOrchestrator:
 
         Returns the MP3 URL. Raises CaptchaRequiredError when the token was
         rejected, anything else for service/fetch problems.
+
+        Providers that advertise ``prefetched_urls`` (spotidown.co) already put
+        the MP3 URL on the Track during load_tracks(), so we reuse it instead of
+        spending a pointless resolve request per track.
         """
-        mp3_url = self.provider.resolve_track(track, cftoken=cftoken)
+        if getattr(self.provider, "prefetched_urls", False) and track.mp3_url:
+            mp3_url = track.mp3_url
+        else:
+            mp3_url = self.provider.resolve_track(track, cftoken=cftoken)
         if temp_dir is not None:
             self._ensure_fetcher()
             try:
@@ -348,10 +426,12 @@ class BatchOrchestrator:
 def make_provider(kind: str):
     from providers.soundloaders import SoundLoadersClient
     from providers.spotidown import SpotiDownClient
+    from providers.spotidown_co import SpotiDownCoClient
 
     mapping = {
         ProviderId.SOUNDLOADERS.value: SoundLoadersClient,
         ProviderId.SPOTIDOWN.value: SpotiDownClient,
+        ProviderId.SPOTIDOWN_CO.value: SpotiDownCoClient,
         ProviderId.MOCK.value: MockProvider,
     }
     cls = mapping.get(kind)

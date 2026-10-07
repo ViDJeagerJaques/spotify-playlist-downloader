@@ -9,9 +9,16 @@ ke layanan pihak ketiga:
 
 | Backend | Status | Endpoint yang dipakai |
 |---|---|---|
-| [SoundLoaders](https://soundloaders.app/) | utama | `POST /action` (daftar track), `POST /action/tracks` (MP3 per track) |
-| [SpotiDown](https://spotidown.app/) | cadangan | `POST /action` (daftar track), `POST /action/track` (MP3 per track) |
+| [SpotiDown.co](https://spotidown.co/) | **utama (default)** | `api.spotidown.co/search/...` (daftar track **+ link MP3 sekaligus**), `api.spotidown.co/savemp3/...` (MP3) |
+| [SoundLoaders](https://soundloaders.app/) | cadangan | `POST /action` (daftar track), `POST /action/tracks` (MP3 per track) |
+| [SpotiDown.app](https://spotidown.app/) | cadangan | `POST /action` (daftar track), `POST /action/track` (MP3 per track) |
 | Demo (Mock) | offline | data contoh, untuk mencoba UI tanpa jaringan |
+
+Kenapa SpotiDown.co jadi default: dua provider lama butuh token CAPTCHA
+(Turnstile / reCAPTCHA v3) yang **terikat session browser** pemegangnya, jadi
+tidak bisa dipakai ulang dari proses Streamlit. SpotiDown.co tidak memerlukan
+token yang Anda tempel — situsnya menyelesaikan Cloudflare-nya sendiri di dalam
+Chrome asli yang kita jalankan.
 
 ## Menjalankan
 
@@ -32,15 +39,53 @@ core/
   cleanup.py                 hapus file sementara batch
 providers/
   base.py                    tipe data Track/ResolveResult + kelas error
-  soundloaders.py  <-- DEPENDENCY: satu-satunya tempat request ke SoundLoaders
-  spotidown.py      <-- DEPENDENCY: satu-satunya tempat request ke SpotiDown
+  spotidown_co.py    <-- DEPENDENCY: Chrome via CDP ke spotidown.co (default)
+  soundloaders.py    <-- DEPENDENCY: request ke SoundLoaders (cadangan)
+  spotidown.py        <-- DEPENDENCY: request ke spotidown.app (cadangan)
   parsing.py                 parser HTML toleran (markup bisa berubah)
   mock.py                    provider demo tanpa jaringan
   _http.py                   helper session/headers
+ui/
+  data.py                    adapter hasil provider -> dict untuk 5 halaman UI
+  dummy.py                   data dummy untuk demo offline
 tests/
   smoke.py                   unit fungsional (parser, orchestrator, i18n) — offline
+  test_spotidown_co.py       unit provider SpotiDown.co — offline (pakai fixture nyata)
   test_app.py                end-to-end Streamlit AppTest memakai Mock provider
+tools/
+  spotidown_grab.py          skrip CLI referensi yang sudah terbukti jalan
 ```
+
+### Halaman UI
+
+1. **Home** — tempel URL playlist sekali, lalu dipakai semua halaman selama sesi.
+2. **Download Playlist** — batch per Part (maks 100 lagu/Part) → satu ZIP.
+3. **Download Lagu** — grid card + search + centang → unduh per lagu atau ZIP.
+4. **Download Song Cover** — grid cover + search + centang → ZIP gambar.
+5. **Backup** — export metadata TXT / JSON / CSV.
+
+### Provider SpotiDown.co — yang perlu Anda tahu
+
+- **Chrome harus terpasang** di mesin ini, dan jendela Chrome **akan terlihat
+  terbuka** (tidak headless). Itu syarat mutlak: Cloudflare menolak browser yang
+  terdeteksi otomatisasi. Jangan tutup/minimize jendela itu saat proses berjalan
+  (Chromeguarded tab di-throttle → Turnstile tidak jalan).
+- Provider ini menjalankan Chrome sendiri lalu attach lewat CDP
+  (`--remote-debugging-port`). **Jangan** menggantinya dengan
+  `playwright.chromium.launch()` — sudah dicoba dan selalu ditolak Cloudflare.
+- Hanya boleh **satu tab** spotidown.co terbuka; tab kedua membuat `main.js`
+  milik situs crash di `turnstile.render()` lalu menggantung.
+- `/search` sesekali membalas **HTTP 500** untuk satu muat halaman lalu berhasil
+  di percobaan berikutnya; provider otomatis memuat ulang halaman dan mencoba
+  lagi (maks 4×).
+- **Link MP3 cepat kedaluwarsa** (`sig` berumur pendek) — karena itu unduhan
+  harus langsung berjalan setelah playlist dimuat, dan app bisa diminta memuat
+  ulang playlist kalau link-nya sudah mati.
+- **Batas free tier 100 track per playlist.** Ini batas resmi layanan; app
+  menampilkan peringatan jujur kalau playlist lebih panjang dan **tidak**
+  mencoba mengakuinya.
+- Kalau `spotidown.co` tutup atau ubah API-nya, provider ini mati — tidak ada
+  scraper Spotify sendiri di app ini.
 
 ### Dependencies
 
@@ -177,6 +222,10 @@ Tampil juga di UI (expander "Disclaimer & Catatan Legal"):
 ## Test
 
 ```powershell
-.venv\Scripts\python.exe tests\smoke.py       # unit fungsional (offline)
-.venv\Scripts\python.exe tests\test_app.py    # end-to-end UI (Mock provider)
+.venv\Scripts\python.exe tests\smoke.py            # unit fungsional (offline)
+.venv\Scripts\python.exe tests\test_spotidown_co.py # provider SpotiDown.co (offline, fixture nyata)
+.venv\Scripts\python.exe tests\test_app.py         # end-to-end UI (Mock provider)
 ```
+
+`tests/test_spotidown_co.py` memakai payload `/search` asli yang tersimpan di
+`tools/probe7_result.json`, jadi tidak perlu jaringan maupun Chrome.

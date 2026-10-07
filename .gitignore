@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Chrome CDP profile (cache, cookies, session data - NEVER commit)
+tools/cdp-profile/
+
+# Downloads (user data - never commit)
+downloads/
+
+# Test artifacts
+tools/_*.mp3
+tools/_*.json
+tools/probe*_result.json
+tools/widget.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log

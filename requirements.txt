@@ -8,9 +8,14 @@
 #                       recommended; code falls back to html.parser if missing)
 #   jinja2           -> bundled/streamlit ecosystem template dependency; kept
 #                       explicit so environment versions stay consistent
+#   playwright       -> drives a REAL Chrome over CDP for spotidown.co
+#                       (providers/spotidown_co.py). Only the Python package is
+#                       needed; we never install Chromium browsers because the
+#                       provider attaches to the Chrome already on the machine.
 
 streamlit>=1.40
 requests>=2.31
 beautifulsoup4>=4.12
 lxml>=5.0
 jinja2>=3.1
+playwright>=1.44

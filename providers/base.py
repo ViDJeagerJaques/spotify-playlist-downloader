@@ -18,6 +18,7 @@ class ProviderId(str, Enum):
 
     SOUNDLOADERS = "soundloaders"
     SPOTIDOWN = "spotidown"
+    SPOTIDOWN_CO = "spotidown_co"   # spotidown.co (browser-driven; see spotidown_co.py)
     MOCK = "mock"
 
 
@@ -31,6 +32,10 @@ class Track:
     artist: str = "Unknown"
     thumbnail: str = ""
     mp3_url: Optional[str] = None  # set after resolve_track succeeds
+    # Optional metadata. Providers that return richer JSON (spotidown.co) fill
+    # these in; the older HTML-scraping providers leave them at their defaults.
+    duration_ms: int = 0          # track length in milliseconds (0 = unknown)
+    album: str = ""               # album title when the provider reports one
 
     @property
     def filename(self) -> str:
