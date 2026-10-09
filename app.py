@@ -45,10 +45,14 @@ from ui import data as ui_data
 from ui import dummy as ui_dummy
 
 # ---------------------------------------------------------------- constants
+# Default is YouTube: no browser, no CAPTCHA, runs on a VPS. The metadata comes
+# from Spotify's public embed page (no auth at all), so no .env is needed for
+# public playlists.
 PROVIDER_CHOICES = {
-    ProviderId.SPOTIDOWN_CO.value: "SpotiDown.co (Chrome, tanpa CAPTCHA manual)",
-    ProviderId.SOUNDLOADERS.value: "SoundLoaders (utama / primary)",
-    ProviderId.SPOTIDOWN.value: "SpotiDown.app (cadangan / fallback)",
+    ProviderId.YOUTUBE.value: "YouTube via yt-dlp (default — tanpa browser)",
+    ProviderId.SPOTIDOWN_CO.value: "SpotiDown.co (legacy — butuh Chrome terbuka)",
+    ProviderId.SOUNDLOADERS.value: "SoundLoaders (legacy — butuh token Cloudflare)",
+    ProviderId.SPOTIDOWN.value: "SpotiDown.app (legacy — butuh token reCAPTCHA)",
     ProviderId.MOCK.value: "Demo (Mock, offline)",
 }
 DEMO_URL = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
@@ -126,7 +130,7 @@ def init_state() -> None:
         "batch": None,      # BatchResult of the last batch run
         "history": [],      # one dict per finished action (batch / single)
         "lang": "id",
-        "backend": ProviderId.SPOTIDOWN_CO.value,
+        "backend": ProviderId.YOUTUBE.value,
         "download_mode": DownloadMode.STREAM_LOCAL.value,
         "captcha_token": "",
         "provider_obj": None,  # provider client reused so listing + resolve share one session/cookie
@@ -333,9 +337,30 @@ def sidebar_nav() -> None:
             st.session_state.provider_obj = None
             _reset_playlist_state()
             st.rerun()
-        if backend == ProviderId.SPOTIDOWN_CO.value:
-            st.caption("Chrome akan terbuka di layar. Jangan ditutup / minimize "
-                       "saat proses berjalan.")
+        if backend == ProviderId.YOUTUBE.value:
+            with st.expander("Kebutuhan & batasan (YouTube)", expanded=False):
+                st.markdown(
+                    "- **Audio berasal dari YouTube**, bukan dari Spotify. "
+                    "Kualitas = hasil upload di YouTube; kadang bisa salah versi.\n"
+                    "- Daftar lagu dibaca dari **halaman embed publik Spotify** — "
+                    "tanpa login, tanpa credential.\n"
+                    "- Butuh **`yt-dlp`** (`pip install -U yt-dlp`, sering diupdate) "
+                    "dan **`ffmpeg`** di PATH.\n"
+                    "- **YouTube memblokir IP datacenter/VPS** (\"Sign in to confirm "
+                    "you're not a bot\"). Deploy publik butuh proxy residential "
+                    "(berbayar). Di PC rumah aman.\n"
+                    "- Lambat: tiap lagu = search + download + konversi. Jangan "
+                    "naikkan jumlah worker.\n"
+                    "- Personal use saja."
+                )
+        elif backend == ProviderId.SPOTIDOWN_CO.value:
+            st.warning("Backend legacy. Butuh **Chrome terpasang** dan jendela "
+                       "Chrome akan terbuka di layar — jangan ditutup/minimize "
+                       "saat proses berjalan.", icon="⚠️")
+        elif backend in (ProviderId.SOUNDLOADERS.value, ProviderId.SPOTIDOWN.value):
+            st.warning("Backend legacy: butuh token CAPTCHA manual yang "
+                       "diambil dari browser Anda sendiri (lihat README).",
+                       icon="⚠️")
 
         st.divider()
         if st.session_state.get("playlist_url"):
@@ -419,8 +444,12 @@ def _load_playlist(url: str) -> None:
         return
 
     provider = _get_provider()
-    note = "Membuka Chrome… jangan tutup/minimize jendela Chrome yang muncul." \
-        if backend == ProviderId.SPOTIDOWN_CO.value else "Menghubungi layanan…"
+    if backend == ProviderId.SPOTIDOWN_CO.value:
+        note = "Membuka Chrome… jangan tutup/minimize jendela Chrome yang muncul."
+    elif backend == ProviderId.YOUTUBE.value:
+        note = "Membaca daftar lagu dari halaman publik Spotify…"
+    else:
+        note = "Menghubungi layanan…"
     with st.spinner(note, show_time=True):
         result = provider.load_tracks(url)
     st.session_state.real_tracks = result.tracks
@@ -429,6 +458,16 @@ def _load_playlist(url: str) -> None:
 
 def _mock_result(title: str, url: str, tracks: list) -> ResolveResult:
     return ResolveResult(title=title, source_url=url, tracks=tracks)
+
+
+def _prefetched_urls() -> bool:
+    """True when the backend hands out ready MP3 URLs during load_tracks().
+
+    The YouTube provider does NOT: it builds the MP3 locally during download,
+    so mp3_url is empty by design and we must not flag it as missing.
+    """
+    provider = st.session_state.get("provider_obj")
+    return bool(getattr(provider, "prefetched_urls", False))
 
 
 def _tracks_by_id() -> dict:
@@ -478,6 +517,12 @@ def _render_ui_batch_result() -> None:
         st.warning(f"{result.ok}/{result.total} berhasil, {result.failed} gagal — {result.summary}")
     else:
         st.success(f"{result.ok}/{result.total} berhasil — {result.summary}")
+
+    if st.session_state.backend == ProviderId.YOUTUBE.value:
+        st.caption("Audio diambil dari YouTube. Kalau ada lagu gagal, sering "
+                   "karena tidak ada versi yang cocok di YouTube — ganti judul "
+                   "di kotak search, atau unduh lagunya satu per satu dari "
+                   "halaman Download Lagu.")
 
     if result.zip_path and result.zip_path.exists():
         try:
@@ -610,10 +655,14 @@ def page_home() -> None:
                 st.write("")
     with c2:
         st.subheader(view["title"])
-        st.caption(f"{len(tracks)} lagu • batas free tier {ui_data.BATCH_LIMIT} track/playlist")
+        st.caption(f"{len(tracks)} lagu • batas {ui_data.BATCH_LIMIT} lagu per batch")
         st.caption(f"Sumber: `{view['url']}`")
-        with_mp3 = sum(1 for t in tracks if t.get("mp3_url"))
-        st.caption(f"{with_mp3}/{len(tracks)} lagu punya link MP3 dari layanan.")
+        if st.session_state.backend == ProviderId.YOUTUBE.value:
+            st.caption("Daftar lagu: Spotify (halaman publik). "
+                       "Audio: YouTube — dicari & diunduh saat kamu klik download.")
+        else:
+            with_mp3 = sum(1 for t in tracks if t.get("mp3_url"))
+            st.caption(f"{with_mp3}/{len(tracks)} lagu punya link MP3 dari layanan.")
 
     st.divider()
     st.subheader("Pilih aksi")
@@ -659,8 +708,7 @@ def page_playlist() -> None:
     parts = ui_data.chunk_parts(rows, ui_data.BATCH_LIMIT)
 
     if len(rows) <= ui_data.BATCH_LIMIT:
-        st.success(f"Satu batch: {len(rows)} lagu "
-                   f"(≤ batas free tier {ui_data.BATCH_LIMIT}).")
+        st.success(f"Satu batch: {len(rows)} lagu (≤ {ui_data.BATCH_LIMIT}).")
     else:
         st.info(f"{len(rows)} lagu dibagi menjadi {len(parts)} Part "
                 f"(maks {ui_data.BATCH_LIMIT} lagu/Part).")
@@ -673,7 +721,7 @@ def page_playlist() -> None:
                 line = f"{n:02d}. **{t['title']}** — {t['artist']}"
                 if t.get("duration"):
                     line += f" `({t['duration']})`"
-                if not t.get("mp3_url") and st.session_state.backend != ProviderId.MOCK.value:
+                if _prefetched_urls() and not t.get("mp3_url"):
                     line += " ⚠️ tanpa link MP3"
                 st.markdown(line)
             targets = [by_id[t["id"]] for t in part if t["id"] in by_id]
@@ -757,8 +805,7 @@ def page_songs() -> None:
 
                     key = f"one_{t['id']}"
                     if st.button("Unduh 1 lagu", key=key, use_container_width=True,
-                                 disabled=not t.get("mp3_url")
-                                 and st.session_state.backend != ProviderId.MOCK.value):
+                                 disabled=(_prefetched_urls() and not t.get("mp3_url"))):
                         track = by_id.get(t["id"])
                         if track is None:
                             st.warning("Data lagu tidak ditemukan.")

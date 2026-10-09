@@ -13,11 +13,25 @@ build/
 venv/
 env/
 
+# Secrets - NEVER commit
+.env
+.env.local
+*.env
+
+# Spotify download cache
+.cache/
+*.mp3
+*.m4a
+*.webm
+*.part
+
 # Streamlit
 .streamlit/secrets.toml
 
-# Chrome CDP profile (cache, cookies, session data - NEVER commit)
+# Chrome CDP profiles (cookies + session data - NEVER commit)
 tools/cdp-profile/
+tools/chrome-profile*/
+chrome-profile*/
 
 # Downloads (user data - never commit)
 downloads/

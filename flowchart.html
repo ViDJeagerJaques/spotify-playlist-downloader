@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spotify Playlist Downloader — Flowchart</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #020617;
+    color: #e2e8f0;
+    font-family: 'JetBrains Mono', monospace;
+    padding: 40px 20px;
+    min-height: 100vh;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+
+  /* Header */
+  .header { text-align: center; margin-bottom: 40px; }
+  .header .dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    background: #34d399; margin-right: 10px;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+  .header h1 { font-size: 24px; font-weight: 700; }
+  .header p { color: #94a3b8; font-size: 13px; margin-top: 8px; }
+
+  /* Diagram card */
+  .diagram-card {
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 30px;
+    margin-bottom: 30px;
+    overflow-x: auto;
+  }
+  .diagram-card h2 {
+    font-size: 14px; font-weight: 600; margin-bottom: 20px;
+    color: #94a3b8; text-transform: uppercase; letter-spacing: 1px;
+  }
+
+  /* SVG */
+  svg { display: block; margin: 0 auto; }
+
+  /* Legend */
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 20px;
+    justify-content: center; margin-top: 20px;
+    padding-top: 20px; border-top: 1px solid #1e293b;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+  .legend-box {
+    width: 16px; height: 16px; border-radius: 4px;
+    border: 1.5px solid;
+  }
+
+  /* Summary cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px; }
+  .card {
+    background: #0f172a; border: 1px solid #1e293b;
+    border-radius: 10px; padding: 20px;
+  }
+  .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .card h3 { font-size: 14px; font-weight: 600; }
+  .card ul { list-style: none; }
+  .card li { font-size: 12px; color: #94a3b8; padding: 4px 0; padding-left: 16px; position: relative; }
+  .card li::before { content: "•"; position: absolute; left: 0; color: #475569; }
+  .card li.ok { color: #34d399; }
+  .card li.warn { color: #fbbf24; }
+  .card li.bad { color: #fb7185; }
+
+  /* Footer */
+  .footer { text-align: center; color: #475569; font-size: 11px; margin-top: 40px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <h1><span class="dot"></span>Spotify Playlist Downloader — Flowchart</h1>
+    <p>Dua pendekatan: SpotiDown.co (sekarang) vs YouTube Pipeline (usulan baru)</p>
+  </div>
+
+  <!-- ==================== DIAGRAM 1: SPOTIDOWN.CO ==================== -->
+  <div class="diagram-card">
+    <h2>Alur 1 — SpotiDown.co (Metode Sekarang)</h2>
+    <svg width="900" height="520" viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+        </marker>
+        <marker id="arrow-green" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#34d399"/>
+        </marker>
+        <marker id="arrow-red" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#fb7185"/>
+        </marker>
+      </defs>
+
+      <!-- User -->
+      <rect x="350" y="10" width="200" height="50" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="450" y="30" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="600">User</text>
+      <text x="450" y="46" text-anchor="middle" fill="#94a3b8" font-size="9">Paste playlist URL</text>
+
+      <line x1="450" y1="60" x2="450" y2="90" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- Streamlit UI -->
+      <rect x="300" y="95" width="300" height="60" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="450" y="118" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="600">Streamlit UI</text>
+      <text x="450" y="134" text-anchor="middle" fill="#94a3b8" font-size="9">Input link → klik Load</text>
+
+      <line x1="450" y1="155" x2="450" y2="185" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- Chrome Launch -->
+      <rect x="280" y="190" width="340" height="70" rx="8" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="450" y="215" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="600">Launch Chrome (CDP)</text>
+      <text x="450" y="232" text-anchor="middle" fill="#94a3b8" font-size="9">--remote-debugging-port=9222</text>
+      <text x="450" y="246" text-anchor="middle" fill="#94a3b8" font-size="9">Visible window, no automation flags</text>
+
+      <line x1="450" y1="260" x2="450" y2="290" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- SpotiDown.co -->
+      <rect x="280" y="295" width="340" height="70" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="450" y="320" text-anchor="middle" fill="#34d399" font-size="12" font-weight="600">spotidown.co</text>
+      <text x="450" y="337" text-anchor="middle" fill="#94a3b8" font-size="9">Turnstile solved by site itself</text>
+      <text x="450" y="351" text-anchor="middle" fill="#94a3b8" font-size="9">Returns JSON with MP3 URLs</text>
+
+      <line x1="450" y1="365" x2="450" y2="395" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- Download -->
+      <rect x="300" y="400" width="300" height="60" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="450" y="425" text-anchor="middle" fill="#34d399" font-size="12" font-weight="600">Download MP3 + ZIP</text>
+      <text x="450" y="441" text-anchor="middle" fill="#94a3b8" font-size="9">curl → CDN 123tokyo.xyz → ZIP</text>
+
+      <!-- Side notes -->
+      <rect x="650" y="190" width="220" height="120" rx="8" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="4,4"/>
+      <text x="760" y="215" text-anchor="middle" fill="#fb7185" font-size="11" font-weight="600">⚠ Keterbatasan</text>
+      <text x="760" y="235" text-anchor="middle" fill="#94a3b8" font-size="9">• Butuh Chrome installed</text>
+      <text x="760" y="250" text-anchor="middle" fill="#94a3b8" font-size="9">• Butuh desktop</text>
+      <text x="760" y="265" text-anchor="middle" fill="#94a3b8" font-size="9">• Nggak bisa di-deploy</text>
+      <text x="760" y="280" text-anchor="middle" fill="#94a3b8" font-size="9">• Tergantung 1 service</text>
+      <text x="760" y="295" text-anchor="middle" fill="#94a3b8" font-size="9">• Free tier: max 100 tracks</text>
+
+      <rect x="30" y="295" width="220" height="100" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,4"/>
+      <text x="140" y="320" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">✓ Kelebihan</text>
+      <text x="140" y="340" text-anchor="middle" fill="#94a3b8" font-size="9">• Audio asli Spotify 320kbps</text>
+      <text x="140" y="355" text-anchor="middle" fill="#94a3b8" font-size="9">• Tanpa API key</text>
+      <text x="140" y="370" text-anchor="middle" fill="#94a3b8" font-size="9">• Tanpa CAPTCHA manual</text>
+      <text x="140" y="385" text-anchor="middle" fill="#94a3b8" font-size="9">• Sudah terbukti jalan</text>
+    </svg>
+  </div>
+
+  <!-- ==================== DIAGRAM 2: YOUTUBE PIPELINE ==================== -->
+  <div class="diagram-card">
+    <h2>Alur 2 — YouTube Pipeline (Usulan Baru)</h2>
+    <svg width="900" height="580" viewBox="0 0 900 580" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arrow2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+        </marker>
+      </defs>
+
+      <!-- User -->
+      <rect x="350" y="10" width="200" height="50" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="450" y="30" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="600">User</text>
+      <text x="450" y="46" text-anchor="middle" fill="#94a3b8" font-size="9">Paste playlist URL</text>
+
+      <line x1="450" y1="60" x2="450" y2="90" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+      <!-- Web App / Server -->
+      <rect x="280" y="95" width="340" height="60" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="450" y="118" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="600">Web App / Server</text>
+      <text x="450" y="134" text-anchor="middle" fill="#94a3b8" font-size="9">Streamlit / Flask / FastAPI</text>
+
+      <line x1="450" y1="155" x2="450" y2="185" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+      <!-- Spotify Metadata -->
+      <rect x="280" y="190" width="340" height="70" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="450" y="215" text-anchor="middle" fill="#34d399" font-size="12" font-weight="600">Spotify Metadata</text>
+      <text x="450" y="232" text-anchor="middle" fill="#94a3b8" font-size="9">API / SpotifyScraper / embed page</text>
+      <text x="450" y="246" text-anchor="middle" fill="#94a3b8" font-size="9">→ title, artist, album, duration</text>
+
+      <line x1="450" y1="260" x2="450" y2="290" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+      <!-- YouTube Search -->
+      <rect x="280" y="295" width="340" height="70" rx="8" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="450" y="320" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="600">YouTube Search</text>
+      <text x="450" y="337" text-anchor="middle" fill="#94a3b8" font-size="9">yt-dlp search: "title artist official audio"</text>
+      <text x="450" y="351" text-anchor="middle" fill="#94a3b8" font-size="9">→ best match by duration</text>
+
+      <line x1="450" y1="365" x2="450" y2="395" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+      <!-- yt-dlp Download -->
+      <rect x="280" y="400" width="340" height="70" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="450" y="425" text-anchor="middle" fill="#34d399" font-size="12" font-weight="600">yt-dlp + ffmpeg</text>
+      <text x="450" y="442" text-anchor="middle" fill="#94a3b8" font-size="9">Download audio → convert to MP3</text>
+      <text x="450" y="456" text-anchor="middle" fill="#94a3b8" font-size="9">Embed metadata + album art</text>
+
+      <line x1="450" y1="470" x2="450" y2="500" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+      <!-- ZIP -->
+      <rect x="300" y="505" width="300" height="50" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="450" y="528" text-anchor="middle" fill="#34d399" font-size="12" font-weight="600">ZIP → User Download</text>
+      <text x="450" y="544" text-anchor="middle" fill="#94a3b8" font-size="9">All tracks in one ZIP file</text>
+
+      <!-- Side notes -->
+      <rect x="650" y="190" width="220" height="140" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,4"/>
+      <text x="760" y="215" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">✓ Kelebihan</text>
+      <text x="760" y="235" text-anchor="middle" fill="#94a3b8" font-size="9">• Bisa di-deploy ke server</text>
+      <text x="760" y="250" text-anchor="middle" fill="#94a3b8" font-size="9">• Tanpa browser</text>
+      <text x="760" y="265" text-anchor="middle" fill="#94a3b8" font-size="9">• Tanpa CAPTCHA</text>
+      <text x="760" y="280" text-anchor="middle" fill="#94a3b8" font-size="9">• Open source friendly</text>
+      <text x="760" y="295" text-anchor="middle" fill="#94a3b8" font-size="9">• Bisa untuk semua orang</text>
+      <text x="760" y="310" text-anchor="middle" fill="#94a3b8" font-size="9">• Unlimited tracks</text>
+
+      <rect x="30" y="190" width="220" height="140" rx="8" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="4,4"/>
+      <text x="140" y="215" text-anchor="middle" fill="#fb7185" font-size="11" font-weight="600">⚠ Keterbatasan</text>
+      <text x="140" y="235" text-anchor="middle" fill="#94a3b8" font-size="9">• Audio dari YouTube</text>
+      <text x="140" y="250" text-anchor="middle" fill="#94a3b8" font-size="9">• Kualitas tergantung match</text>
+      <text x="140" y="265" text-anchor="middle" fill="#94a3b8" font-size="9">• Butuh yt-dlp + ffmpeg</text>
+      <text x="140" y="280" text-anchor="middle" fill="#94a3b8" font-size="9">• Kebanyakan butuh API key</text>
+      <text x="140" y="295" text-anchor="middle" fill="#94a3b8" font-size="9">• Lebih lambat (search per lagu)</text>
+      <text x="140" y="310" text-anchor="middle" fill="#94a3b8" font-size="9">• Belum terbukti jalan</text>
+    </svg>
+  </div>
+
+  <!-- ==================== COMPARISON CARDS ==================== -->
+  <div class="cards">
+    <div class="card">
+      <div class="card-header">
+        <div class="card-dot" style="background:#34d399"></div>
+        <h3>SpotiDown.co (Sekarang)</h3>
+      </div>
+      <ul>
+        <li class="ok">Audio asli Spotify 320kbps</li>
+        <li class="ok">Tanpa API key</li>
+        <li class="ok">Tanpa CAPTCHA manual</li>
+        <li class="ok">Sudah terbukti jalan</li>
+        <li class="bad">Butuh Chrome installed</li>
+        <li class="bad">Butuh desktop</li>
+        <li class="bad">Nggak bisa di-deploy</li>
+        <li class="bad">Tergantung 1 service</li>
+        <li class="warn">Free tier: max 100 tracks</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-dot" style="background:#fbbf24"></div>
+        <h3>YouTube Pipeline (Usulan)</h3>
+      </div>
+      <ul>
+        <li class="ok">Bisa di-deploy ke server</li>
+        <li class="ok">Tanpa browser</li>
+        <li class="ok">Tanpa CAPTCHA</li>
+        <li class="ok">Open source friendly</li>
+        <li class="ok">Bisa untuk semua orang</li>
+        <li class="ok">Unlimited tracks</li>
+        <li class="bad">Audio dari YouTube</li>
+        <li class="bad">Kualitas tergantung match</li>
+        <li class="warn">Butuh yt-dlp + ffmpeg</li>
+        <li class="warn">Kebanyakan butuh API key</li>
+        <li class="warn">Belum terbukti jalan</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-dot" style="background:#22d3ee"></div>
+        <h3>Rekomendasi</h3>
+      </div>
+      <ul>
+        <li class="ok">Prototype dulu: 10 lagu</li>
+        <li class="ok">Tes kualitas audio</li>
+        <li class="ok">Tes kecepatan download</li>
+        <li class="ok">Kalau OK → lanjut bikin lengkap</li>
+        <li class="warn">Kalau nggak OK → cari cara lain</li>
+        <li class="warn">SpotiDown.co tetap jadi fallback</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="footer">
+    Generated by Hermes Agent — Spotify Playlist Downloader Project
+  </div>
+
+</div>
+</body>
+</html>

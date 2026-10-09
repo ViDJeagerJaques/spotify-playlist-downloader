@@ -1,0 +1,64 @@
+{
+ "id": "5Ohxk2dO5COHF1krpoPigN",
+ "uri": "spotify:track:5Ohxk2dO5COHF1krpoPigN",
+ "name": "Sign of the Times",
+ "title": "Sign of the Times",
+ "subtitle": null,
+ "duration": 340706,
+ "artists": [
+  {
+   "name": "Harry Styles",
+   "uri": "spotify:artist:6KImCVD70vtIoJWnq6nGn3"
+  }
+ ],
+ "coverArt": null,
+ "visualIdentity": {
+  "backgroundBase": {
+   "alpha": 255,
+   "blue": 16,
+   "green": 24,
+   "red": 64
+  },
+  "backgroundTintedBase": {
+   "alpha": 255,
+   "blue": 55,
+   "green": 65,
+   "red": 109
+  },
+  "textBase": {
+   "alpha": 255,
+   "blue": 255,
+   "green": 255,
+   "red": 255
+  },
+  "textBrightAccent": {
+   "alpha": 255,
+   "blue": 255,
+   "green": 255,
+   "red": 255
+  },
+  "textSubdued": {
+   "alpha": 255,
+   "blue": 181,
+   "green": 193,
+   "red": 247
+  },
+  "image": [
+   {
+    "url": "https://image-cdn-fa.spotifycdn.com/image/ab67616d00001e023f8b8a9c71b2bd2f3019940b",
+    "maxHeight": 300,
+    "maxWidth": 300
+   },
+   {
+    "url": "https://image-cdn-fa.spotifycdn.com/image/ab67616d000048513f8b8a9c71b2bd2f3019940b",
+    "maxHeight": 64,
+    "maxWidth": 64
+   },
+   {
+    "url": "https://image-cdn-fa.spotifycdn.com/image/ab67616d0000b2733f8b8a9c71b2bd2f3019940b",
+    "maxHeight": 640,
+    "maxWidth": 640
+   }
+  ]
+ }
+}

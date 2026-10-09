@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import random
 import re
+import shutil
 import tempfile
 import time
 import zipfile
@@ -175,6 +176,26 @@ class _FetchError(Exception):
     """Internal marker: MP3 URL resolved fine but the file download failed."""
 
 
+class LocalCopyFetcher:
+    """Fetcher for providers that produce a finished file on disk themselves.
+
+    The YouTube provider runs search + download + ffmpeg inside
+    ``resolve_track`` and hands back a local path. There is nothing to download
+    over HTTP — we just move the file into the staging directory.
+    """
+
+    def fetch(self, url: str, dest: Path) -> None:
+        src = Path(url)
+        if not src.exists():
+            raise _FetchError(f"file tidak ada: {src}")
+        if src.stat().st_size == 0:
+            raise _FetchError(f"file kosong: {src}")
+        if dest.exists() and dest.stat().st_size > 0:
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+
+
 class BatchOrchestrator:
     """Run resolve for every track and optionally assemble a local ZIP."""
 
@@ -187,6 +208,10 @@ class BatchOrchestrator:
         if self._fetcher is None:
             if getattr(self.provider, "provider", None) == ProviderId.MOCK:
                 self._fetcher = MockDownloadHandler()
+            elif getattr(self.provider, "provider", None) == ProviderId.YOUTUBE:
+                # The YouTube provider already produced a finished MP3 on disk
+                # (search + download + ffmpeg). "Fetching" is a local copy.
+                self._fetcher = LocalCopyFetcher()
             elif getattr(self.provider, "prefetched_urls", False):
                 # Provider already handed us the MP3 URL per track, and its CDN
                 # rejects a random share of requests -> retry, correct headers.
@@ -427,11 +452,13 @@ def make_provider(kind: str):
     from providers.soundloaders import SoundLoadersClient
     from providers.spotidown import SpotiDownClient
     from providers.spotidown_co import SpotiDownCoClient
+    from providers.youtube import YouTubeClient
 
     mapping = {
         ProviderId.SOUNDLOADERS.value: SoundLoadersClient,
         ProviderId.SPOTIDOWN.value: SpotiDownClient,
         ProviderId.SPOTIDOWN_CO.value: SpotiDownCoClient,
+        ProviderId.YOUTUBE.value: YouTubeClient,
         ProviderId.MOCK.value: MockProvider,
     }
     cls = mapping.get(kind)

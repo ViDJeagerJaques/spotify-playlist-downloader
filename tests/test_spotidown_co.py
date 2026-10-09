@@ -27,7 +27,7 @@ from ui import data as ui_data  # noqa: E402
 
 PASS = []
 FAIL = []
-FIXTURE = ROOT / "tools" / "probe7_result.json"
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "spotidown_search_response.json"
 
 
 def check(name, cond, detail=""):
@@ -38,10 +38,7 @@ def check(name, cond, detail=""):
 
 def _real_payload() -> dict:
     """The actual /search body captured during the successful run."""
-    raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    captured = raw.get("captured") or []
-    best = max(captured, key=lambda c: len(c.get("body") or ""))
-    return json.loads(best["body"])
+    return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
 def test_free_tier_limit_is_real():

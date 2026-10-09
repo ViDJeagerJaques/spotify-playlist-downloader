@@ -1,0 +1,197 @@
+{
+ "name": "Harry Styles",
+ "title": "Harry Styles",
+ "coverArt": null,
+ "trackList": [
+  {
+   "uri": "spotify:track:4u9Y4Z9i9VaAbBK7rW1Rha",
+   "uid": "e3476f1c15814171aaea",
+   "title": "Meet Me in the Hallway",
+   "subtitle": "Harry Styles",
+   "isExplicit": false,
+   "isNineteenPlus": false,
+   "contentRatings": {
+    "labels": []
+   },
+   "duration": 227200,
+   "isPlayable": true,
+   "playabilityReason": "PLAYABLE",
+   "audioPreview": {
+    "format": "MP3_96",
+    "url": "https://p.scdn.co/mp3-preview/81f6f66a7a77de69d7bb337263e1770209a8129e"
+   },
+   "entityType": "track"
+  },
+  {
+   "uri": "spotify:track:5Ohxk2dO5COHF1krpoPigN",
+   "uid": "2114a22b4115dd2f1eee",
+   "title": "Sign of the Times",
+   "subtitle": "Harry Styles",
+   "isExplicit": false,
+   "isNineteenPlus": false,
+   "contentRatings": {
+    "labels": []
+   },
+   "duration": 340706,
+   "isPlayable": true,
+   "playabilityReason": "PLAYABLE",
+   "audioPreview": {
+    "format": "MP3_96",
+    "url": "https://p.scdn.co/mp3-preview/3f677086b8a90e1b9affde439d2ba55c77044799"
+   },
+   "entityType": "track"
+  },
+  {
+   "uri": "spotify:track:3Dwq1oiOFys6Sxr5SslmXw",
+   "uid": "97b86d2dee211cc7aeb6",
+   "title": "Carolina",
+   "subtitle": "Harry Styles",
+   "isExplicit": false,
+   "isNineteenPlus": false,
+   "contentRatings": {
+    "labels": []
+   },
+   "duration": 189624,
+   "isPlayable": true,
+   "playabilityReason": "PLAYABLE",
+   "audioPreview": {
+    "format": "MP3_96",
+    "url": "https://p.scdn.co/mp3-preview/da9f62f0d723c53bc743238ea00e7a8697816bf7"
+   },
+   "entityType": "track"
+  },
+  {
+   "uri": "spotify:track:4B1rpPmQXwj78wk6aIGwwU",
+   "uid": "5bde2f494abdaa8c608d",
+   "title": "Two Ghosts",
+   "subtitle": "Harry Styles",
+   "isExplicit": false,
+   "isNineteenPlus": false,
+   "contentRatings": {
+    "labels": []
+   },
+   "duration": 229802,
+   "isPlayable": true,
+   "playabilityReason": "PLAYABLE",
+   "audioPreview": {
+    "format": "MP3_96",
+    "url": "https://p.scdn.co/mp3-preview/44569063b49cebb17080827a4287364a23f6a421"
+   },
+   "entityType": "track"
+  },
+  {
+   "uri": "spotify:track:5kRPPEWFJIMox5qIkQkiz5",
+   "uid": "4fc12ba93e59ae03f744",
+   "title": "Sweet Creature",
+   "subtitle": "Harry Styles",
+   "isExplicit": false,
+   "isNineteenPlus": false,
+   "contentRatings": {
+    "labels": []
+   },
+   "duration": 224870,
+   "isPlayable": true,
+   "playabilityReason": "PLAYABLE",
+   "audioPreview": {
+    "format": "MP3_96",
+    "url": "https://p.scdn.co/mp3-preview/4c2b06d211bdd44484a79c6ad470f7830bbf2532"
+   },
+   "entityType": "track"
+  },
+  {
+   "uri": "spotify:track:5Lbsc65org0b85kNsPkluY",
+   "uid": "a53e040f46b765c3d30a",
+   "title": "Only Angel",
+   "subtitle": "Harry Styles",
+   "isExplicit": false,
+   "isNineteenPlus": false,
+   "contentRatings": {
+    "labels": []
+   },
+   "duration": 291081,
+   "isPlayable": true,
+   "playabilityReason": "PLAYABLE",
+   "audioPreview": {
+    "format": "MP3_96",
+    "url": "https://p.scdn.co/mp3-preview/ab3acd21a750b45db91ff5400cc159b1294d0670"
+   },
+   "entityType": "track"
+  },
+  {
+   "uri": "spotify:track:33SNO8AaciGbNaQFkxvPrW",
+   "uid": "911fc61b807bedd567e9",
+   "title": "Kiwi",
+   "subtitle": "Harry Styles",
+   "isExplicit": false,
+   "isNineteenPlus": false,
+   "contentRatings": {
+    "labels": []
+   },
+   "duration": 176386,
+   "isPlayable": true,
+   "playabilityReason": "PLAYABLE",
+   "audioPreview": {
+    "format": "MP3_96",
+    "url": "https://p.scdn.co/mp3-preview/3ab3914b574664b5cddc9d3bed95bcb8bb6b0958"
+   },
+   "entityType": "track"
+  },
+  {
+   "uri": "spotify:track:5LABCxgmP7DATATIJXOh6n",
+   "uid": "5e40a520ef10b6f1b08b",
+   "title": "Ever Since New York",
+   "subtitle": "Harry Styles",
+   "isExplicit": false,
+   "isNineteenPlus": false,
+   "contentRatings": {
+    "labels": []
+   },
+   "duration": 253386,
+   "isPlayable": true,
+   "playabilityReason": "PLAYABLE",
+   "audioPreview": {
+    "format": "MP3_96",
+    "url": "https://p.scdn.co/mp3-preview/8126a4bc500d20e5b11a1ebbd2671d4bb405e199"
+   },
+   "entityType": "track"
+  },
+  {
+   "uri": "spotify:track:33bURv895AN4FkBvgFo2dx",
+   "uid": "f25fafb2c88a0c007ef7",
+   "title": "Woman",
+   "subtitle": "Harry Styles",
+   "isExplicit": false,
+   "isNineteenPlus": false,
+   "contentRatings": {
+    "labels": []
+   },
+   "duration": 278800,
+   "isPlayable": true,
+   "playabilityReason": "PLAYABLE",
+   "audioPreview": {
+    "format": "MP3_96",
+    "url": "https://p.scdn.co/mp3-preview/067730ffebb936fbb1e85cc58e31c66259634e40"
+   },
+   "entityType": "track"
+  },
+  {
+   "uri": "spotify:track:1IF5UcqRO42D12vYwceOY6",
+   "uid": "a0ccee8e26ae93ea59c0",
+   "title": "From the Dining Table",
+   "subtitle": "Harry Styles",
+   "isExplicit": false,
+   "isNineteenPlus": false,
+   "contentRatings": {
+    "labels": []
+   },
+   "duration": 211954,
+   "isPlayable": true,
+   "playabilityReason": "PLAYABLE",
+   "audioPreview": {
+    "format": "MP3_96",
+    "url": "https://p.scdn.co/mp3-preview/fb748fbf8a7a0815c5dac54057b552da2f6c980d"
+   },
+   "entityType": "track"
+  }
+ ]
+}

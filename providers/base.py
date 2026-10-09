@@ -19,6 +19,7 @@ class ProviderId(str, Enum):
     SOUNDLOADERS = "soundloaders"
     SPOTIDOWN = "spotidown"
     SPOTIDOWN_CO = "spotidown_co"   # spotidown.co (browser-driven; see spotidown_co.py)
+    YOUTUBE = "youtube"             # Spotify metadata + yt-dlp audio (deployable)
     MOCK = "mock"
 
 
