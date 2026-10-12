@@ -7,12 +7,17 @@ lagu), lihat daftar lagunya, lalu unduh sebagai MP3 (satuan atau ZIP).
 
 ```
 Daftar lagu  : halaman embed publik Spotify  ->  open.spotify.com/embed/...
+               + spclient (token anonim)     ->  daftar lagu PENUH, tanpa batas
+Metadata     : spclient /metadata/4/track/... ->  album, label, tahun, nomor track
+Cover        : /embed/track + oEmbed          ->  cover album asli 640x640
 Audio        : yt-dlp cari + unduh dari YouTube, ffmpeg konversi ke MP3
+Tag          : tag ID3 ditulis ulang dari metadata Spotify + cover ditanam
 ```
 
 Jadi **audio berasal dari YouTube, bukan dari Spotify**. Aplikasi ini tidak
 punya database MP3 dan bukan scraper Spotify: dia cuma mencari video yang
-cocok di YouTube lalu mengunduhnya.
+cocok di YouTube lalu mengunduhnya, kemudian **menuliskan metadata Spotify yang
+benar** ke file hasilnya (judul, artist, album, label, tahun, cover).
 
 | Backend | Status | Catatan |
 |---|---|---|
@@ -62,6 +67,8 @@ Cover album asli per lagu juga diambil **tanpa token** (lewat `/embed/track` +
 oEmbed), jadi credential Web API di bawah hanya untuk langkah login playlist
 private.
 
+**1. Siapkan credential app** (sekali saja):
+
 1. Buka <https://developer.spotify.com/dashboard> → buat app
    (Spotify mewajibkan akun **Premium** untuk app sejak Februari 2026).
 2. Salin **Client ID** dan **Client Secret**.
@@ -74,10 +81,30 @@ SPOTIFY_CLIENT_SECRET=yyyy
 
 `.env` sudah ada di `.gitignore` — **jangan pernah di-commit**.
 
+**2. Ambil refresh token:**
+
+1. Di app: **Home** → buka *"Playlist private? Hubungkan Spotify (opsional)"*.
+2. Klik **Buka halaman login Spotify** → login → izinkan.
+3. Salin `code` dari URL hasil (parameter `?code=...`) → tempel di kotak.
+4. Klik **Simpan ke .env** — aplikasi menulis `SPOTIFY_REFRESH_TOKEN` sendiri.
+5. Klik **Load Playlist** lagi.
+
+**Perbedaannya:**
+
+| | Tanpa token (default) | Dengan `SPOTIFY_REFRESH_TOKEN` |
+|---|---|---|
+| Playlist publik (100+ lagu) | ✅ **penuh, tanpa batas** | ✅ |
+| Album / lagu tunggal | ✅ | ✅ |
+| Cover album per lagu | ✅ | ✅ |
+| Playlist **private** | ❌ | ✅ |
+| Perlu login | tidak | sekali saja |
+
+> Token hanya disimpan di `.env` milikmu. Tidak ada credential di dalam kode.
+>
 > Catatan jujur: sejak perubahan Spotify Februari 2026, token Client
 > Credentials **tidak lagi bisa membaca isi playlist** (`/playlists/{id}/items`
-> → 401 `Valid user authentication required`). Jadi jalur Web API untuk playlist
-> hanya bisa dipakai bila kamu melakukan login user — lihat bagian berikutnya.
+> → 401 `Valid user authentication required`). Itulah kenapa playlist publik
+> dibaca lewat jalur embed + spclient, dan token user hanya untuk yang private.
 
 ### Membaca playlist tanpa batas 100 lagu
 
@@ -131,35 +158,6 @@ Karena itu jalur playlist **dilarang** lewat sana dan diganti
 `/embed/track` + oEmbed yang terbukti bebas rate limit (20/20 sukses,
 ~312 ms/request). `api.spotify.com` hanya menyisakan untuk Single track/album.
 
-### Hubungkan Spotify (opsional) — hanya untuk playlist PRIVATE
-
-> ⚠️ **Tidak wajib.** Playlist publik sudah dibaca penuh tanpa login.
-
-Kalau playlistmu **private** (atau mau app membaca playlist milikmu sendiri),
-baru token ini diperlukan:
-
-**Cara mendapat refresh token (sekali saja):**
-
-1. Pastikan `.env` sudah berisi `SPOTIFY_CLIENT_ID` + `SPOTIFY_CLIENT_SECRET`.
-2. Di app: **Home** → buka *"Playlist private? Hubungkan Spotify
-   (opsional)"*.
-3. Klik **Buka halaman login Spotify** → login → izinkan.
-4. Salin `code` dari URL hasil (parameter `?code=...`) → tempel di kotak.
-5. Klik **Simpan ke .env** — aplikasi menulis `SPOTIFY_REFRESH_TOKEN` sendiri.
-6. Klik **Load Playlist** lagi. Sekarang playlist private terbaca.
-
-**Perbedaannya:**
-
-| | Tanpa token (default) | Dengan `SPOTIFY_REFRESH_TOKEN` |
-|---|---|---|
-| Playlist publik (**100+**) | ✅ **penuh, tanpa batas** | ✅ |
-| Album / lagu tunggal | ✅ | ✅ |
-| Cover album per lagu | ✅ | ✅ |
-| Playlist **private** | ❌ | ✅ |
-| Perlu login | tidak | sekali saja |
-
-> Token hanya disimpan di `.env` milikmu. Tidak ada credential di dalam kode.
-
 ## Menjalankan
 
 ```powershell
@@ -181,6 +179,8 @@ providers/
   base.py                    tipe data Track/ResolveResult + kelas error
   youtube.py         <-- DEPENDENCY: yt-dlp ke YouTube (default)
   spotify_embed.py   <-- DEPENDENCY: baca halaman embed publik Spotify
+  spotify_spclient.py <-- DEPENDENCY: spclient Spotify (playlist penuh + album/label)
+  tags.py                    tulis tag ID3 + cover ke MP3
   spotify_meta.py    <-- DEPENDENCY: Spotify Web API (fallback, butuh .env)
   spotidown_co.py    <-- DEPENDENCY: Chrome via CDP ke spotidown.co (legacy)
   soundloaders.py    <-- DEPENDENCY: request ke SoundLoaders (legacy)
@@ -504,7 +504,13 @@ Tampil juga di UI (expander "Disclaimer & Catatan Legal"):
 .venv\Scripts\python.exe tests\smoke.py              # 25 cek, offline
 .venv\Scripts\python.exe tests\test_youtube.py       # 27 cek, offline
 .venv\Scripts\python.exe tests\test_spotify_embed.py # 35 cek, offline
-.venv\Scripts\python.exe tests\test_spotidown_co.py  # 42 cek, offline
+.venv\Scripts\python.exe tests\test_spclient.py      # 115 cek, offline
+.venv\Scripts\python.exe tests\test_tags.py          # tag ID3 + cover, offline
+.venv\Scripts\python.exe tests\test_cover_size.py    # resolusi cover, offline
+.venv\Scripts\python.exe tests\test_spotidown_co.py  # 67 cek, offline
+.venv\Scripts\python.exe tests\test_theme.py         # tema + CSS, offline
+.venv\Scripts\python.exe tests\test_fetch_bytes.py   # 12 cek, offline
+.venv\Scripts\python.exe tests\test_oauth.py         # 32 cek, offline
 .venv\Scripts\python.exe tests\test_app.py           # end-to-end UI (Mock)
 ```
 
@@ -516,3 +522,19 @@ Untuk cek manual provider YouTube (butuh internet + ffmpeg):
 ```powershell
 .venv\Scripts\python.exe -c "from providers.youtube import YouTubeClient; print(YouTubeClient().load_tracks('https://open.spotify.com/album/1FZKIm3JVDCxTchXDo5jOV').title)"
 ```
+
+## Dokumentasi tambahan
+
+Catatan pengembangan ada di `docs/`:
+
+| File | Isi |
+|---|---|
+| `docs/prd.md` | Product requirements (versi awal) |
+| `docs/to-do.md` | Daftar tugas |
+| `docs/REVISI_BARU.md` | Catatan revisi R0–R4 + status verifikasi |
+| `docs/CATATAN_REVISI.md` | Catatan revisi terakhir |
+| `docs/PROMPT_OPENCODE_*.md` | Prompt yang dipakai untuk mendelegasikan tiap tahap ke OpenCode |
+
+File `PROMPT_OPENCODE_*.md` disimpan sebagai jejak: tiap prompt berisi diagnosis
+akar masalah, bukti, dan kriteria verifikasi yang dipakai saat tahap itu
+dikerjakan.
