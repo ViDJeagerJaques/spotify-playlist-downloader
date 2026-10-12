@@ -37,6 +37,13 @@ class Track:
     # these in; the older HTML-scraping providers leave them at their defaults.
     duration_ms: int = 0          # track length in milliseconds (0 = unknown)
     album: str = ""               # album title when the provider reports one
+    # Tagging metadata (R4). Populated from the anonymous Spotify metadata
+    # endpoint; every field is optional and simply left at its default when the
+    # provider cannot supply it.
+    label: str = ""               # record label, e.g. "Polydor Records"
+    year: int = 0                 # release year, 0 = unknown
+    track_number: int = 0         # position within the album, 0 = unknown
+    disc_number: int = 0          # disc, 0 = unknown
 
     @property
     def filename(self) -> str:
@@ -88,3 +95,33 @@ def _slug(text: str, max_len: int = 120) -> str:
     if not cleaned:
         cleaned = "track"
     return cleaned[:max_len]
+
+
+# --------------------------------------------------------------------------
+# Cover art resolution
+# --------------------------------------------------------------------------
+# A Spotify CDN image URL encodes the size in its prefix. The hash after the
+# prefix is identical at every size, so we can request the big one by swapping
+# the prefix — no re-hashing, no API call.
+#
+#   ab67616d00001e02... -> 300x300  (~45 KB)   what oEmbed hands out
+#   ab67616d0000b273... -> 640x640  (~158 KB)  what we want
+#   ab67616d00004851... ->  64x64   (~4 KB)
+#
+# Album art uses the "ab67616d" family. PLAYLIST images use a different family
+# ("ab67706f") and 404 at the large prefix, so the replacement is deliberately
+# narrow: it only ever rewrites the exact small-album prefix.
+COVER_SMALL_PREFIX = "ab67616d00001e02"
+COVER_LARGE_PREFIX = "ab67616d0000b273"
+
+
+def upgrade_cover_url(url: str) -> str:
+    """Request the 640x640 version of an album cover instead of 300x300.
+
+    Safe by construction: it only rewrites the exact small-album prefix, so
+    playlist images (``ab67706f…``) and any non-Spotify host are left untouched —
+    upgrading those would 404.
+    """
+    if not url:
+        return url
+    return url.replace(COVER_SMALL_PREFIX, COVER_LARGE_PREFIX)

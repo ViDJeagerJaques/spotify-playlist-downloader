@@ -1,0 +1,17 @@
+{
+ "revision": "AAAA7mb9Sqn7KTbPGZV0VBllxjapLB5f",
+ "length": 213,
+ "attributes": {"name": "Dupe", "picture": "q2dwbAAA2oTRqRqf8MR+2CnzmHQ="},
+ "contents": {
+  "pos": 0,
+  "truncated": false,
+  "items": [
+   {"uri": "spotify:track:70C4NyhjD5OZUMzvWZ3njJ", "attributes": {"addedBy": "spotify", "timestamp": "1770998541000", "itemId": "aaa"}},
+   {"uri": "spotify:track:64qfw9JZl3RYCrq4Mn0WvT", "attributes": {"addedBy": "spotify", "timestamp": "1770998541001", "itemId": "bbb"}},
+   {"uri": "spotify:track:3iy2QuCtCzpWnR6tia39AB", "attributes": {"addedBy": "spotify", "timestamp": "1770998541002", "itemId": "ccc"}}
+  ]
+ },
+ "ownerUsername": "31siy2jiykpjmhgercjuh2j2yrbe",
+ "createdAt": 1770998541000,
+ "isUserCreated": true
+}

@@ -1,0 +1,19 @@
+# NX9 Neural Gateway — tema Streamlit
+# Hanya warna & tipografi. Streamlit tidak bisa merender background WebGL /
+# Three.js seperti desain aslinya, jadi kita hanya menerapkan warna, kontras,
+# dan radius — bukan animasi atau partikel.
+# Lihat README bagian "Tema" untuk catatan lengkap.
+
+[theme]
+primaryColor = "#A8D055"
+backgroundColor = "#050F05"
+secondaryBackgroundColor = "#18181B"
+textColor = "#FFFFFF"
+font = "sans serif"
+
+[server]
+# Playlist 100 lagu butuh beberapa saat (search YouTube + download + ffmpeg).
+headless = true
+
+[browser]
+gatherUsageStats = false

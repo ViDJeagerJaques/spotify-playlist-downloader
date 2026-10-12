@@ -36,12 +36,14 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional
 
-from .base import ServiceError, Track
+from .base import ServiceError, Track, upgrade_cover_url
 
 EMBED_BASE = "https://open.spotify.com/embed/{kind}/{sid}"
 OEMBED_URL = ("https://open.spotify.com/oembed?url="
@@ -51,6 +53,12 @@ TIMEOUT = 25
 
 # The embed page caps the visible list at 100 entries.
 EMBED_ITEM_LIMIT = 100
+
+# Disc cache for album cover URLs. Spotify's public embed page only exposes ONE
+# image for the whole playlist, so the real per-album artwork must come from the
+# Web API (GET /tracks/{id}). Caching means re-loading the same playlist — or a
+# different playlist containing the same tracks — costs zero requests.
+CACHE_DIR = Path(tempfile.gettempdir()) / "spotify_yt_cache"
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
@@ -159,7 +167,11 @@ def tracks_from_entity(entity: dict, cover_for: str = "") -> List[Track]:
 
 
 def _playlist_cover(entity: dict) -> str:
-    """Best available cover image URL from the embed entity (may be '')."""
+    """Best available PLAYLIST image URL from the embed entity (may be '').
+
+    Deliberately NOT upgraded to 640x640: playlist art uses a different prefix
+    family (``ab67706f…``) and 404s at the large album prefix.
+    """
     art = entity.get("coverArt")
     if isinstance(art, dict):
         sources = art.get("sources") or []
@@ -184,6 +196,10 @@ def oembed_cover(kind: str, sid: str) -> str:
 
     Spotify serves these from image-cdn / mosaic.scdn.co with permissive CORS;
     they are plain image files, so ``requests.get`` is enough to save them.
+
+    Album/track covers come back at 300x300 and are upgraded to 640x640. For a
+    playlist the prefix is different and the upgrade is a no-op, so it is safe to
+    apply unconditionally.
     """
     url = OEMBED_URL.format(kind=kind, sid=urllib.parse.quote(sid))
     try:
@@ -192,10 +208,10 @@ def oembed_cover(kind: str, sid: str) -> str:
         return ""
     thumb = str(data.get("thumbnail_url") or "")
     if thumb:
-        return thumb
+        return upgrade_cover_url(thumb)
     images = data.get("images") or []
     if images and isinstance(images[0], dict):
-        return str(images[0].get("url") or "")
+        return upgrade_cover_url(str(images[0].get("url") or ""))
     return ""
 
 
@@ -205,6 +221,174 @@ def embed_tracks(url: str, max_items: int = 0) -> tuple[str, List[Track], str, s
     ``hint`` explains any truncation we could not avoid. ``max_items`` > 0 stops
     early (useful for tests).
     """
+    title, tracks, hint, cover, _owner, _total_ms = embed_tracks_detailed(
+        url, max_items=max_items)
+    return title, tracks, hint, cover
+
+
+def embed_tracks_complete(url: str, max_items: int = 0,
+                          progress=None) -> tuple:
+    """Read a playlist with NO 100-song cap, using only anonymous endpoints.
+
+    This is the primary path for public playlists:
+
+        1. embed playlist page -> first 100 songs + anon token + owner + cover
+        2. spclient (anon token) -> every track id, in playlist order
+        3. /embed/track + oEmbed  -> metadata + cover for every song
+        4. spclient metadata      -> album / label / year / track number (ID3)
+
+    Returns ``(title, tracks, hint, cover_url, owner, total_duration_ms)``.
+
+    ``progress(done, total)`` is called while step 3 runs so the UI can show a
+    bar — a 213-song playlist takes a while on a cold cache.
+
+    NOTHING here touches api.spotify.com, which rate-limits hard (429).
+    Private playlists still need a user login; see ``spotify_meta.py``.
+    """
+    from .spotify_meta import parse_spotify_url
+
+    kind, sid = parse_spotify_url(url)
+
+    # ---- steps 1+2: the embed page, then the full list via its anon token
+    anon = ""
+    ids: List[str] = []
+    length = 0
+    owner = ""
+    truncated = False
+    html = ""
+    entity: dict = {}
+    first_batch: List[Track] = []
+    title = "Spotify"
+    embed_owner = ""
+    cover = ""
+    try:
+        html = _get(EMBED_BASE.format(kind=kind, sid=sid))
+        entity = parse_embed_page(html)
+
+        title = str(entity.get("name") or entity.get("title") or "Spotify")
+        embed_owner = str(entity.get("subtitle") or "").strip()
+        cover = _playlist_cover(entity) or oembed_cover(kind, sid)
+        first_batch = tracks_from_entity(entity, cover_for=cover)
+        if max_items:
+            first_batch = first_batch[:max_items]
+
+        from .spotify_spclient import extract_anon_token, playlist_track_ids
+
+        anon = extract_anon_token(html)
+        ids, length, owner, truncated = playlist_track_ids(sid, anon)
+    except Exception as exc:  # noqa: BLE001
+        # Rate limiting or a shape change must not lose the playlist: keep
+        # whatever the embed page already gave us.
+        if not first_batch:
+            raise
+        ids, length, owner, truncated = [], 0, "", False
+        anon = ""
+
+    # A single track or an album is already complete on the embed page.
+    if kind != "playlist":
+        total_ms = sum(int(t.duration_ms or 0) for t in first_batch)
+        return title, first_batch, "", cover, embed_owner, total_ms
+
+    if not ids:
+        # Graceful degradation: keep the 100 songs and explain the shortfall.
+        hint = _cap_hint(len(first_batch), len(first_batch))
+        total_ms = sum(int(t.duration_ms or 0) for t in first_batch)
+        return title, first_batch, hint, cover, embed_owner, total_ms
+
+    by_id = {t.track_token: t for t in first_batch}
+
+    # ---- steps 3+4: per-track metadata, cover, album/label/year.
+    #
+    # The spclient metadata endpoint already returns title, artists, duration AND
+    # the album artwork, so it is the primary source: one request per song
+    # instead of three (embed track + oEmbed + metadata). That is what keeps a
+    # COLD 213-song load at ~214 requests rather than ~640 — the old shape hit
+    # Spotify's rate limit and came back truncated.
+    #
+    # /embed/track + oEmbed stay as the fallback for anything metadata misses.
+    details = {}
+    tag_meta = {}
+    if ids:
+        try:
+            from .spotify_spclient import cached_metadata_many
+
+            tag_meta = cached_metadata_many(ids, anon)
+            details = {tid: info for tid, info in tag_meta.items() if info}
+        except Exception:  # noqa: BLE001
+            details = {}
+
+        still_missing = [t for t in ids if t not in details]
+        if still_missing:
+            try:
+                details.update(cached_track_details(still_missing, progress=progress))
+            except Exception:  # noqa: BLE001
+                pass
+
+    for tid in ids:
+        info = details.get(tid)
+        if not info:
+            continue          # failed lookup -> the embed row stays as-is
+        # Merge onto the embed row so fields spclient does not return survive.
+        base = by_id.get(tid)
+        artists = info.get("artists") or []
+        album_name = info.get("album") or (base.album if base else "")
+        row = Track(
+            data=tid,
+            track_token=tid,
+            title=info.get("title") or (base.title if base else "Unknown"),
+            artist=", ".join(a for a in artists if a) or (base.artist if base else "Unknown"),
+            thumbnail=info.get("cover") or (base.thumbnail if base else cover),
+            mp3_url=None,
+            duration_ms=int(info.get("duration_ms") or (base.duration_ms if base else 0)),
+            album=album_name,
+        )
+        # Tagging extras (R4). album comes only from the metadata endpoint —
+        # /embed/track has no album name — so it must be applied here too.
+        tag = (tag_meta or {}).get(tid) or {}
+        if tag.get("album"):
+            row.album = str(tag["album"])
+        for attr in ("label", "year", "track_number", "disc_number"):
+            value = tag.get(attr)
+            if value in (None, ""):
+                continue
+            if attr == "label":
+                setattr(row, attr, str(value))
+            else:
+                try:
+                    setattr(row, attr, int(value))
+                except (TypeError, ValueError):
+                    pass
+        by_id[tid] = row
+
+    # Playlist ORDER comes from spclient, not from the order requests finished.
+    tracks = [by_id[t] for t in ids if t in by_id]
+    total_ms = sum(int(t.duration_ms or 0) for t in tracks)
+
+    hint = ""
+    if truncated or len(tracks) < length:
+        hint = (f"Playlist berisi {length} lagu, tapi hanya {len(tracks)} yang "
+                f"bisa dibaca — sebagian item mungkin private, tidak tersedia "
+                f"di region ini, atau playlist-nya masih dimuat sebagian oleh "
+                f"Spotify.")
+    return title, tracks, hint, cover, (embed_owner or owner), total_ms
+
+
+def _cap_hint(shown: int, cap: int) -> str:
+    """Honest message when we only have the embed page's first N songs."""
+    return (f"Hanya {shown} lagu yang terbaca (batas {cap} dari halaman embed "
+            f"publik Spotify). Sisanya tidak bisa dibaca tanpa login — pakai "
+            f"panel \"Hubungkan Spotify\" di bawah, atau backend SpotiDown.co.")
+
+
+def embed_tracks_detailed(url: str, max_items: int = 0) -> tuple:
+    """Same as :func:`embed_tracks` but also returns owner and total duration.
+
+    Returns ``(title, tracks, hint, cover_url, owner, total_duration_ms)``.
+
+    The embed page carries these already (verified): the owner name sits in
+    ``entity["subtitle"]`` and the total duration is the sum of the per-track
+    ``duration`` values in milliseconds.
+    """
     from .spotify_meta import parse_spotify_url
 
     kind, sid = parse_spotify_url(url)
@@ -212,31 +396,36 @@ def embed_tracks(url: str, max_items: int = 0) -> tuple[str, List[Track], str, s
     entity = parse_embed_page(html)
 
     title = str(entity.get("name") or entity.get("title") or "Spotify")
+    # For a playlist/album the subtitle is the owner's name; for a bare track it
+    # is the artist. Either way it is the only such field on the page.
+    owner = str(entity.get("subtitle") or "").strip()
 
     if kind == "track":
-        # A single track has no trackList; the entity itself is the track.
         tid = str(entity.get("id") or _track_id(str(entity.get("uri") or "")))
         if not tid:
-            return title, [], "Halaman embed tidak memuat data lagu.", ""
+            return title, [], "Halaman embed tidak memuat data lagu.", "", owner, 0
         artists = entity.get("artists") or []
         artist = ", ".join(
             str(a.get("name") or "") for a in artists if isinstance(a, dict)
         ).strip(" ,") or str(entity.get("subtitle") or "Unknown")
         cover = _playlist_cover(entity) or oembed_cover(kind, tid)
+        dur = int(entity.get("duration") or 0)
         track = Track(
             data=tid, track_token=tid,
             title=str(entity.get("title") or entity.get("name") or "Unknown"),
             artist=artist,
             thumbnail=cover, mp3_url=None,
-            duration_ms=int(entity.get("duration") or 0),
+            duration_ms=dur,
             album=str(entity.get("title") or "") if kind == "album" else "",
         )
-        return title, [track], "", cover
+        return title, [track], "", cover, owner, dur
 
     cover = _playlist_cover(entity) or oembed_cover(kind, sid)
     tracks = tracks_from_entity(entity, cover_for=cover)
     if max_items:
         tracks = tracks[:max_items]
+
+    total_ms = sum(int(t.duration_ms or 0) for t in tracks)
 
     hint = ""
     total = 0
@@ -253,4 +442,45 @@ def embed_tracks(url: str, max_items: int = 0) -> tuple[str, List[Track], str, s
                 f"per batch — untuk playlist lebih besar, pecah jadi beberapa "
                 f"playlist atau pakai backend SpotiDown.co.")
 
-    return title, tracks, hint, cover
+    return title, tracks, hint, cover, owner, total_ms
+
+
+# --------------------------------------------------------------------------
+# per-track album cover art (anonymous embed + oEmbed, cached)
+# The cache itself lives in spotify_spclient.py: it must hold metadata AND
+# the artwork, and /embed/track returns no cover of its own.
+# --------------------------------------------------------------------------
+
+def fetch_album_covers(track_ids: List[str], workers: int = 8) -> Dict[str, str]:
+    """Return ``{track_id: cover_url}``, using the disk cache where possible.
+
+    WHICH ENDPOINT THIS USES (and why it matters)
+    ----------------------------------------------
+    This used to call ``GET /tracks/{id}`` on ``api.spotify.com``. That endpoint
+    answers ``429 QUOTA_EXCEEDED`` almost continuously under any real load and
+    did not recover after 30/60/120 s, so for playlists it is now forbidden.
+
+    We use the anonymous chain instead: ``/embed/track/{id}`` for metadata and
+    oEmbed for the artwork. Both were measured quota-free (20/20 requests OK),
+    and the oEmbed image hash is identical to the Web API's.
+
+    Returns ``{}`` if nothing can be resolved — the caller then keeps the
+    playlist-level cover rather than showing a broken list.
+    """
+    ids = [str(t) for t in track_ids if t]
+    if not ids:
+        return {}
+
+    from .spotify_spclient import cached_track_details
+
+    try:
+        details = cached_track_details(ids, workers=workers)
+    except Exception:  # noqa: BLE001 - artwork is cosmetic, never break a load
+        return {}
+
+    covers: Dict[str, str] = {}
+    for tid, info in details.items():
+        url = str((info or {}).get("cover") or "")
+        if url:
+            covers[tid] = url
+    return covers

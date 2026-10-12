@@ -13,7 +13,9 @@ No premium gate, upgrade prompt or paywall exists anywhere in this app.
 """
 from __future__ import annotations
 
+import html
 import json
+import re
 import time
 from pathlib import Path
 
@@ -43,6 +45,7 @@ from providers.mock import _mock_mp3_bytes
 # pada tahap ini); download asli akan disambung kembali di tahap berikutnya.
 from ui import data as ui_data
 from ui import dummy as ui_dummy
+from ui import theme as ui_theme
 
 # ---------------------------------------------------------------- constants
 # Default is YouTube: no browser, no CAPTCHA, runs on a VPS. The metadata comes
@@ -139,6 +142,8 @@ def init_state() -> None:
         "playlist_url": "",          # link Spotify dari Home, dipakai semua halaman
         "playlist_view": None,       # dict hasil ui_data.playlist_view()
         "real_tracks": [],           # list[Track] asli (punya mp3_url + thumbnail)
+        "covers_loaded": 0,          # berapa lagu yang memakai cover album asli
+        "cover_note": "",            # catatan kalau cover per lagu tak lengkap
         "ui_batch": None,            # BatchResult terakhir
         "ui_batch_label": "",        # label batch terakhir (mis. "Part 1")
         "ui_batch_tracks": [],       # Track[] yang jadi target batch terakhir
@@ -381,6 +386,8 @@ def _reset_playlist_state() -> None:
     st.session_state.playlist_url = ""
     st.session_state.playlist_view = None
     st.session_state.real_tracks = []
+    st.session_state.covers_loaded = 0
+    st.session_state.cover_note = ""
     st.session_state.ui_batch = None
     st.session_state.ui_batch_label = ""
     st.session_state.ui_batch_tracks = []
@@ -395,6 +402,7 @@ def main() -> None:
                        layout="wide")
     init_state()
     lang = st.session_state.lang
+    ui_theme.inject_theme()   # NX9 colours + fonts, once per rerun
     sidebar_nav()
 
     page = st.session_state.get("page", "home")
@@ -445,15 +453,118 @@ def _load_playlist(url: str) -> None:
 
     provider = _get_provider()
     if backend == ProviderId.SPOTIDOWN_CO.value:
-        note = "Membuka Chrome… jangan tutup/minimize jendela Chrome yang muncul."
+        note = "Membuka Chrome. jangan tutup/minimize jendela Chrome yang muncul."
     elif backend == ProviderId.YOUTUBE.value:
-        note = "Membaca daftar lagu dari halaman publik Spotify…"
+        note = "Membaca daftar lagu dari halaman publik Spotify."
     else:
-        note = "Menghubungi layanan…"
-    with st.spinner(note, show_time=True):
+        note = "Menghubungi layanan."
+
+    # Reading a large playlist means one /embed/track + one oEmbed request per
+    # song (213 songs took ~77 s on a cold cache), so show real progress rather
+    # than an indefinite spinner.
+    progress_bar = None
+    status_line = None
+    if backend == ProviderId.YOUTUBE.value:
+        progress_bar = st.progress(0.0, text=note)
+        status_line = st.empty()
+
+    def _report(done: int, total: int) -> None:
+        if progress_bar is None:
+            return
+        frac = min(done / max(1, total), 1.0)
+        progress_bar.progress(frac, text=f"{note} — {done}/{total} lagu")
+        if status_line is not None:
+            status_line.caption(f"Mengambil cover album asli: {done}/{total}")
+
+    try:
+        with st.spinner(note, show_time=True):
+            result = provider.load_tracks(url, progress=_report)
+    except TypeError:
+        # Legacy providers do not accept a progress callback.
         result = provider.load_tracks(url)
+    finally:
+        if progress_bar is not None:
+            progress_bar.empty()
+        if status_line is not None:
+            status_line.empty()
+
     st.session_state.real_tracks = result.tracks
-    st.session_state.playlist_view = ui_data.playlist_view(result)
+
+    # Header extras (owner, total duration) discovered while loading. The
+    # provider already fetched them, so this makes no extra request.
+    owner, total_ms = _embed_header_info(provider)
+    view = ui_data.playlist_view(result)
+    view["owner"] = owner
+    # The playlist's own cover. Falls back to the first track's album art when a
+    # legacy provider (SpotiDown.co / SoundLoaders) doesn't supply one.
+    view["playlist_cover"] = getattr(provider, "last_playlist_cover", "") or ""
+    view["total_duration_ms"] = view.get("total_duration_ms") or total_ms
+    st.session_state.playlist_view = view
+
+    # Covers for songs the embed page could not describe. The default provider
+    # (YouTube -> SpotifyMeta -> embed_tracks_complete) already filled these in,
+    # so this only does work for the legacy backends.
+    st.session_state.covers_loaded = 0
+    st.session_state.cover_note = ""
+    if backend != ProviderId.MOCK.value and _needs_cover_pass(view):
+        _enrich_covers(result.tracks, view)
+
+
+def _needs_cover_pass(view: dict) -> bool:
+    """True when tracks are still sharing the playlist's single cover image."""
+    rows = view.get("tracks") or []
+    if not rows:
+        return False
+    covers = {r.get("cover") for r in rows}
+    return len(covers) <= 1
+
+
+def _embed_header_info(provider) -> tuple[str, int]:
+    """Owner + total duration already discovered while loading the playlist.
+
+    The provider reads them from the same embed page it fetched for the track
+    list, so this never makes a second network call. Older providers simply
+    report empty values and the header omits those lines.
+    """
+    owner = str(getattr(provider, "last_owner", "") or "")
+    total_ms = int(getattr(provider, "last_total_duration_ms", 0) or 0)
+    return owner, total_ms
+
+
+def _enrich_covers(tracks: list, view: dict) -> None:
+    """Replace the shared playlist image with each track's real album cover.
+
+    Needs Spotify API credentials in ``.env``; without them every track keeps
+    the playlist cover and we say so instead of failing.
+    """
+    from providers.spotify_embed import fetch_album_covers
+
+    ids = [t.track_token or t.data for t in tracks]
+    ids = [i for i in ids if i]
+    if not ids:
+        return
+    try:
+        with st.spinner("Menyiapkan cover album…"):
+            covers = fetch_album_covers(ids)
+    except Exception as exc:  # noqa: BLE001 - covers are cosmetic
+        st.session_state.cover_note = f"Cover per lagu gagal dimuat: {exc}"
+        return
+
+    if not covers:
+        st.session_state.cover_note = (
+            "Cover per lagu belum bisa dimuat. Playlist tetap berjalan dengan "
+            "cover playlist."
+        )
+        return
+
+    n = ui_data.apply_track_covers(view, covers)
+    st.session_state.covers_loaded = n
+    if n < len(tracks):
+        st.session_state.cover_note = (
+            f"{n}/{len(tracks)} lagu memakai cover album aslinya; sisanya "
+            "memakai cover playlist (lagu tidak tersedia di region ini atau "
+            "dihapus dari Spotify)."
+        )
 
 
 def _mock_result(title: str, url: str, tracks: list) -> ResolveResult:
@@ -562,12 +673,29 @@ def _render_ui_batch_result() -> None:
 
 
 def _fetch_mp3_bytes(track: Track) -> bytes:
-    """Ambil satu file MP3 ke memory (untuk tombol unduh per kartu)."""
+    """Ambil satu file MP3 ke memory (tombol "Unduh 1 lagu" di grid/list).
+
+    Delegates to :func:`_fetch_bytes` so this page understands all three
+    provider shapes (mock://, local file from YouTube, real HTTP URL) instead of
+    only the HTTP one.
+    """
     provider = _get_provider()
-    url = track.mp3_url or provider.resolve_track(track, cftoken="")
+    resolved = track.mp3_url or provider.resolve_track(track, cftoken="")
     headers = getattr(provider, "download_headers", None)
-    hdrs = headers() if callable(headers) else {}
-    with requests.get(url, timeout=180, allow_redirects=True, headers=hdrs) as r:
+    if callable(headers):
+        return _fetch_bytes_with_headers(resolved, headers())
+    return _fetch_bytes(resolved)
+
+
+def _fetch_bytes_with_headers(resolved: str, headers: dict) -> bytes:
+    """``_fetch_bytes`` plus the provider-specific headers (legacy providers).
+
+    Local-file handling is shared with :func:`_fetch_bytes` so the YouTube path
+    cannot regress here.
+    """
+    if resolved.startswith("mock://") or _looks_like_filesystem_path(resolved):
+        return _fetch_bytes(resolved)
+    with requests.get(resolved, timeout=180, allow_redirects=True, headers=headers) as r:
         r.raise_for_status()
         return r.content
 
@@ -600,6 +728,159 @@ def _build_cover_zip(tracks: list) -> Path:
         pass
     st.session_state.cover_count = ok
     return zip_path
+
+
+def _render_oauth_prompt() -> None:
+    """Optional Spotify sign-in, shown only when the playlist hit the 100 cap (#1).
+
+    Completely optional: without it the app still works for playlists up to 100
+    songs. It never blocks anything, and no credential is stored in code — only
+    a refresh token the user puts in their own ``.env``.
+    """
+    from providers.spotify_meta import authorize_url, refresh_token_present
+
+    if refresh_token_present():
+        return  # already connected; nothing to offer
+
+    with st.expander("Playlist private? Hubungkan Spotify (opsional)",
+                     expanded=False):
+        st.markdown(
+            "Playlist **publik** dibaca penuh tanpa login — tidak ada lagi "
+            "batas 100 lagu.\n\n"
+            "Kamu hanya perlu ini kalau playlistnya **private** (atau kamu "
+            "ingin app membaca playlist milikmu sendiri). globalement "
+            "`SPOTIFY_REFRESH_TOKEN` membuka jalur baca playlist private.\n\n"
+            "**Sekali saja:**\n"
+            "1. Pastikan `.env` berisi `SPOTIFY_CLIENT_ID` dan "
+            "`SPOTIFY_CLIENT_SECRET`.\n"
+            "2. Buka link di bawah, login ke Spotify, lalu izinkan.\n"
+            "3. Salin `code` dari URL hasil, tempel di kotak bawah.\n"
+            "4. Klik **Simpan ke .env**, lalu **Load Playlist** lagi."
+        )
+        try:
+            url = authorize_url()
+        except ServiceError as exc:
+            st.warning(exc.user_message)
+            return
+
+        st.link_button("Buka halaman login Spotify", url)
+
+        code = st.text_input("Tempel code dari URL hasil:", key="oauth_code",
+                             placeholder="AQ... (code dari Spotify)")
+        if st.button("Simpan ke .env", key="oauth_save"):
+            _save_refresh_token_from_code(code.strip())
+
+        st.caption(
+            "Token disimpan hanya di file `.env` milikmu (sudah masuk "
+            "`.gitignore`, jangan di-commit). Playlist private juga jadi terbaca."
+        )
+
+
+def _save_refresh_token_from_code(code: str) -> None:
+    """Exchange an Authorization Code for a refresh token and append it to .env."""
+    if not code:
+        st.warning("Tempel code dulu.")
+        return
+    import base64 as _b64
+    import urllib.parse as _up
+    import urllib.request as _ur
+
+    from providers.base import ServiceError as _SE
+    from providers.spotify_meta import TOKEN_URL, USER_SCOPES, credentials
+
+    try:
+        cid, secret = credentials()
+    except _SE as exc:
+        st.warning(exc.user_message)
+        return
+
+    basic = _b64.b64encode(f"{cid}:{secret}".encode()).decode()
+    data = _up.urlencode({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": "http://localhost:8501",
+    }).encode()
+    req = _ur.Request(TOKEN_URL, data=data,
+                      headers={"Authorization": f"Basic {basic}",
+                               "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with _ur.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Spotify menolak code itu: {exc}. Coba ambil code baru "
+                 "(code hanya bisa dipakai sekali dan cepat kedaluwarsa).")
+        return
+
+    token = payload.get("refresh_token")
+    if not token:
+        st.error("Spotify tidak mengirim refresh_token.")
+        return
+
+    env_path = Path.cwd() / ".env"
+    try:
+        existing = env_path.read_text(encoding="utf-8").splitlines() \
+            if env_path.exists() else []
+        kept = [ln for ln in existing if not ln.startswith("SPOTIFY_REFRESH_TOKEN=")]
+        kept.append(f"SPOTIFY_REFRESH_TOKEN={token}")
+        env_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    except OSError as exc:
+        st.error(f"Tidak bisa menulis .env: {exc}")
+        return
+
+    st.success("Tersimpan di .env. Klik **Load Playlist** di Home untuk "
+               "membaca playlist private.")
+    st.session_state.provider_obj = None  # force a fresh client on next load
+
+
+def _render_playlist_header(view: dict, tracks: list) -> None:
+    """Spotify-like header: square cover + title, owner, song count, duration (#3).
+
+    Everything shown here already exists in the embed page — nothing is guessed.
+    """
+    # The playlist's OWN artwork, not the first track's album cover — after the
+    # per-track cover work (R1) the tracks no longer share the playlist image,
+    # so picking from them would show an unrelated album.
+    cover = view.get("playlist_cover") or next(
+        (t["cover"] for t in tracks if t.get("cover")), "")
+
+    art_col, body_col = st.columns([1, 3.2], gap="large")
+    with art_col:
+        if cover:
+            # .nx9-art-img forces aspect-ratio 1/1 with object-fit: cover, which
+            # st.image(width=200) cannot do (it keeps the source ratio).
+            st.markdown(
+                f'<div class="nx9-art-img nx9-art-lg">'
+                f'<img src="{html.escape(cover, quote=True)}" alt=""></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown('<div class="nx9-art-img nx9-art-lg"></div>',
+                        unsafe_allow_html=True)
+
+    with body_col:
+        st.markdown(f'<div class="nx9-header-title">{view["title"]}</div>',
+                    unsafe_allow_html=True)
+        bits = []
+        if view.get("owner"):
+            bits.append(f"oleh {view['owner']}")
+        bits.append(f"{len(tracks)} lagu")
+        if view.get("total_duration_ms"):
+            bits.append(ui_data.format_total_duration(view["total_duration_ms"]))
+        parts = ui_data.chunk_parts(tracks, ui_data.PART_SIZE)
+        if len(parts) <= 1:
+            bits.append("1 ZIP penuh")
+        else:
+            bits.append(f"{len(parts)} bagian ZIP")
+        st.markdown(f'<div class="nx9-header-meta">{" • ".join(bits)}</div>',
+                    unsafe_allow_html=True)
+        st.caption(f"Sumber: `{view['url']}`")
+
+        if st.session_state.backend == ProviderId.YOUTUBE.value:
+            st.caption("Daftar lagu: Spotify (halaman publik). "
+                       "Audio: YouTube — dicari & diunduh saat kamu klik download.")
+        else:
+            with_mp3 = sum(1 for t in tracks if t.get("mp3_url"))
+            st.caption(f"{with_mp3}/{len(tracks)} lagu punya link MP3 dari layanan.")
 
 
 def page_home() -> None:
@@ -645,24 +926,12 @@ def page_home() -> None:
         st.warning(view["hint"])
 
     st.divider()
-    c1, c2 = st.columns([1, 3])
-    with c1:
-        cover = next((t["cover"] for t in tracks if t.get("cover")), "")
-        if cover:
-            try:
-                st.image(cover, width=220)
-            except Exception:  # noqa: BLE001
-                st.write("")
-    with c2:
-        st.subheader(view["title"])
-        st.caption(f"{len(tracks)} lagu • batas {ui_data.BATCH_LIMIT} lagu per batch")
-        st.caption(f"Sumber: `{view['url']}`")
-        if st.session_state.backend == ProviderId.YOUTUBE.value:
-            st.caption("Daftar lagu: Spotify (halaman publik). "
-                       "Audio: YouTube — dicari & diunduh saat kamu klik download.")
-        else:
-            with_mp3 = sum(1 for t in tracks if t.get("mp3_url"))
-            st.caption(f"{with_mp3}/{len(tracks)} lagu punya link MP3 dari layanan.")
+    _render_oauth_prompt()
+    _render_playlist_header(view, tracks)
+
+    note = st.session_state.get("cover_note") or ""
+    if note:
+        st.info(note, icon="ℹ️")
 
     st.divider()
     st.subheader("Pilih aksi")
@@ -671,7 +940,8 @@ def page_home() -> None:
     with r1c1:
         with st.container(border=True):
             st.markdown("**1. Download Playlist**")
-            st.caption(f"Batch per Part (maks {ui_data.BATCH_LIMIT} lagu/Part) → ZIP.")
+            st.caption(f"ZIP penuh ≤ {ui_data.PART_SIZE} lagu, di atas itu jadi "
+                       f"Part ({ui_data.PART_SIZE} lagu/Part).")
             if st.button("Buka →", key="nav_playlist", use_container_width=True):
                 _go("playlist")
     with r1c2:
@@ -705,19 +975,21 @@ def page_playlist() -> None:
         st.warning(view["hint"])
 
     by_id = _tracks_by_id()
-    parts = ui_data.chunk_parts(rows, ui_data.BATCH_LIMIT)
+    parts = ui_data.chunk_parts(rows, ui_data.PART_SIZE)
 
-    if len(rows) <= ui_data.BATCH_LIMIT:
-        st.success(f"Satu batch: {len(rows)} lagu (≤ {ui_data.BATCH_LIMIT}).")
+    # Preview the split BEFORE the user clicks anything.
+    if len(rows) <= ui_data.PART_SIZE:
+        st.success(f"**ZIP Full (1 file)** — {len(rows)} lagu "
+                   f"(≤ {ui_data.PART_SIZE}).")
     else:
-        st.info(f"{len(rows)} lagu dibagi menjadi {len(parts)} Part "
-                f"(maks {ui_data.BATCH_LIMIT} lagu/Part).")
+        st.info(f"**ZIP Part ({len(parts)} bagian, {ui_data.PART_SIZE} lagu/bagian)** "
+                f"— {len(rows)} lagu total.")
 
     for p_idx, part in enumerate(parts, 1):
         head = f"Part {p_idx} — {len(part)} lagu"
         with st.expander(head, expanded=(p_idx == 1)):
             for j, t in enumerate(part, 1):
-                n = (p_idx - 1) * ui_data.BATCH_LIMIT + j
+                n = (p_idx - 1) * ui_data.PART_SIZE + j
                 line = f"{n:02d}. **{t['title']}** — {t['artist']}"
                 if t.get("duration"):
                     line += f" `({t['duration']})`"
@@ -741,6 +1013,232 @@ def _grid_select_state(key_set: str, ids: list[str]) -> set:
         cur = set(cur or [])
         st.session_state[key_set] = cur
     return cur
+
+
+# Rows rendered per page in the track lists (#5). 100 rows in one go makes
+# Streamlit re-render painfully slowly, so we page it.
+TRACKS_PER_PAGE = 25
+
+# Cover gallery is a separate layout (R2): square tiles, several per row.
+COVER_COLUMNS = 4
+COVERS_PER_PAGE = 20
+
+
+def _pager(page_key: str, total_items: int, per_page: int = 0) -> tuple[int, int, int]:
+    """Return (page_number, start_index, end_index) for a paginated list."""
+    per_page = per_page or TRACKS_PER_PAGE
+    pages = max(1, (total_items + per_page - 1) // per_page)
+    state_key = f"page_{page_key}"
+    current = int(st.session_state.get(state_key, 0))
+    current = max(0, min(current, pages - 1))
+
+    if pages > 1:
+        cols = st.columns([1, 2, 1, 1])
+        with cols[0]:
+            if st.button("←", key=f"{state_key}_prev", disabled=current == 0,
+                         use_container_width=True):
+                st.session_state[state_key] = current - 1
+                st.rerun()
+        with cols[2]:
+            if st.button("→", key=f"{state_key}_next", disabled=current >= pages - 1,
+                         use_container_width=True):
+                st.session_state[state_key] = current + 1
+                st.rerun()
+        with cols[3]:
+            st.caption(f"{current + 1}/{pages}")
+
+    st.session_state[state_key] = current
+    start = current * per_page
+    return current, start, min(start + per_page, total_items)
+
+
+def _square_cover(url: str, size: int = 48) -> None:
+    """Render a square, cropped cover thumbnail for the song list.
+
+    ``st.image`` preserves the source aspect ratio and gives no hook for our
+    CSS class, so the image is emitted as raw HTML inside ``.nx9-art-img``
+    (defined in ui/theme.py). That is what actually forces a 1:1 crop — see
+    test_theme.py, which asserts the class exists and is injected.
+    """
+    if not url:
+        return
+    st.markdown(
+        f'<div class="nx9-art-img nx9-art-sm">'
+        f'<img src="{html.escape(url, quote=True)}" alt=""></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_track_row(n: int, t: dict, sel: set, by_id: dict, kind: str = "song") -> None:
+    """One horizontal track row: [x] [cover] title / artist•album  dur  [Unduh].
+
+    The vertical, Spotify-like list that replaced the old card grid (#5). This
+    is for the Download **Lagu** page only — the Download Cover page uses
+    :func:`_render_cover_gallery`, because artwork reads better side by side.
+    """
+    sel_key = f"{kind}_sel_{t['id']}"
+    index_col, check_col, art_col, body_col, dur_col, btn_col = st.columns(
+        [0.5, 0.6, 0.9, 5, 0.8, 1.4])
+
+    with index_col:
+        st.caption(f"{n}")
+    with check_col:
+        checked = st.checkbox("Pilih", key=sel_key, value=(t["id"] in sel),
+                              label_visibility="collapsed")
+        if checked:
+            sel.add(t["id"])
+        else:
+            sel.discard(t["id"])
+    with art_col:
+        _square_cover(t.get("cover", ""), size=48)
+    with body_col:
+        st.markdown(f"**{t['title']}**")
+        sub = t["artist"]
+        if t.get("album"):
+            sub += f" • {t['album']}"
+        st.caption(sub)
+    with dur_col:
+        st.caption(t.get("duration", ""))
+    with btn_col:
+        label = "Unduh" if kind == "song" else "Unduh cover"
+        disabled = bool(kind == "song" and _prefetched_urls() and not t.get("mp3_url"))
+        if st.button(label, key=f"one_{kind}_{t['id']}", use_container_width=True,
+                     disabled=disabled):
+            if kind == "cover":
+                _download_one_cover(t)
+            else:
+                _download_one_song(t, by_id)
+    st.divider()
+
+
+def _render_track_table(n: int, t: dict, sel: set, by_id: dict) -> None:
+    """One row of the Spotify-style table used by the Download Lagu page.
+
+    Columns: # / cover / title + artist / album / duration / [Pilih] [Unduh]
+
+    Kept as a separate function rather than reusing ``_render_track_row`` so the
+    legacy list used elsewhere stays untouched.
+
+    Layout: the five presentational columns are one CSS-grid HTML block, and the
+    two widgets live in a neighbouring column. Streamlit widgets cannot be
+    rendered inside ``st.markdown``, so the row is split 2 ways instead of 7 —
+    which also cuts Streamlit's 16px inter-column gap from six per row to one.
+    """
+# vertical_alignment matters: the grid row is 66px tall (48px artwork + padding)
+    # while the button is only 40px. Without centering, Streamlit pins the actions
+    # to the top of the row and they float ~13px above the cover.
+    left, actions = st.columns([10, 1.4], vertical_alignment="center")
+
+    with left:
+        st.markdown(_track_row_html(n, t), unsafe_allow_html=True)
+    with actions:
+        _render_row_actions(t, sel, by_id)
+
+
+def _track_row_html(n: int, t: dict) -> str:
+    """One table row as a single CSS-grid HTML block.
+
+    Only presentational data lives here (number, artwork, title/artist, album,
+    duration). The checkbox and the Unduh button are Streamlit widgets and must
+    be rendered outside ``st.markdown``, which is why the caller splits the row
+    into a [grid | actions] pair.
+
+    Everything interpolated is escaped: track metadata comes from a remote
+    playlist and is not trusted markup.
+    """
+    cover = t.get("cover") or ""
+    art = (
+        f'<img src="{html.escape(cover, quote=True)}" alt="">'
+        if cover else ""
+    )
+    return (
+        '<div class="nx9-tbl-row nx9-tbl-data">'
+        f'  <div class="nx9-tbl-num">{n}</div>'
+        f'  <div class="nx9-tbl-art">{art}</div>'
+        '  <div class="nx9-tbl-body">'
+        f'    <div class="nx9-tbl-title">{html.escape(t.get("title", ""))}</div>'
+        f'    <div class="nx9-tbl-sub">{html.escape(t.get("artist", ""))}</div>'
+        '  </div>'
+        f'  <div class="nx9-tbl-sub nx9-tbl-album">'
+        f'{html.escape(t.get("album") or "—")}</div>'
+        f'  <div class="nx9-tbl-dur">{html.escape(t.get("duration", ""))}</div>'
+        '</div>'
+    )
+
+
+def _render_row_actions(t: dict, sel: set, by_id: dict) -> None:
+    """Checkbox + Unduh button, laid out side by side on one line.
+
+    Stacking them vertically would make the actions column taller than the
+    48px artwork and every row would gain dead space underneath the grid.
+    """
+    with st.container(horizontal=True, gap="small", vertical_alignment="center"):
+        checked = st.checkbox("Pilih", key=f"song_sel_{t['id']}",
+                              value=(t["id"] in sel),
+                              label_visibility="collapsed")
+        if checked:
+            sel.add(t["id"])
+        else:
+            sel.discard(t["id"])
+        disabled = _prefetched_urls() and not t.get("mp3_url")
+        if st.button("Unduh", key=f"one_song_{t['id']}",
+                     disabled=disabled):
+            _download_one_song(t, by_id)
+
+
+def _render_table_header() -> None:
+    """Column captions, aligned with :func:`_render_track_table`.
+
+    Uses the same [grid | actions] split and the same ``grid-template-columns``
+    as the rows, so every caption lands exactly on top of its column.
+    """
+    left, _actions = st.columns([10, 1.4], vertical_alignment="center")
+    with left:
+        st.markdown(
+            '<div class="nx9-tbl-row nx9-tbl-caption">'
+            '<div></div>'
+            '<div></div>'
+            '<div class="nx9-tbl-head">Judul</div>'
+            '<div class="nx9-tbl-head nx9-tbl-album">Album</div>'
+            '<div class="nx9-tbl-head nx9-tbl-dur">Durasi</div>'
+            '</div>',
+            unsafe_allow_html=True)
+
+
+def _download_one_song(t: dict, by_id: dict) -> None:
+    """Fetch one song and offer it as an MP3 download button."""
+    track = by_id.get(t["id"])
+    if track is None:
+        st.warning("Data lagu tidak ditemukan.")
+        return
+    try:
+        with st.spinner(f"Mengunduh {t['title']}…"):
+            data = _fetch_mp3_bytes(track)
+        st.download_button(
+            "Simpan MP3", data=data, file_name=f"{track.filename}.mp3",
+            mime="audio/mpeg", key=f"dl_{t['id']}", use_container_width=True)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Gagal: {type(exc).__name__}: {exc}")
+
+
+def _download_one_cover(t: dict) -> None:
+    """Fetch one cover image and offer it as a download."""
+    url = t.get("cover") or ""
+    if not url:
+        st.warning("Lagu ini tidak punya cover.")
+        return
+    try:
+        with st.spinner(f"Mengunduh cover {t['title']}…"):
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+            data = resp.content
+        from providers.base import _slug  # shared filename rule
+        name = _slug(f"{t.get('artist','')} - {t.get('title','')}") + ".jpg"
+        st.download_button("Simpan cover", data=data, file_name=name,
+                           mime="image/jpeg", key=f"dlcover_{t['id']}",
+                           use_container_width=True)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Gagal: {type(exc).__name__}: {exc}")
 
 
 def page_songs() -> None:
@@ -782,46 +1280,14 @@ def page_songs() -> None:
         st.rerun()
 
     st.divider()
-    cols_per_row = 3
-    for i in range(0, len(shown), cols_per_row):
-        cols = st.columns(cols_per_row)
-        for col, t in zip(cols, shown[i:i + cols_per_row]):
-            with col:
-                with st.container(border=True):
-                    if t.get("cover"):
-                        try:
-                            st.image(t["cover"], use_container_width=True)
-                        except Exception:  # noqa: BLE001
-                            pass
-                    st.markdown(f"**{t['title']}**")
-                    meta = t["artist"] + (f" • {t['duration']}" if t.get("duration") else "")
-                    st.caption(meta)
-                    checked = st.checkbox("Pilih", key=f"song_sel_{t['id']}",
-                                          value=(t["id"] in sel))
-                    if checked:
-                        sel.add(t["id"])
-                    else:
-                        sel.discard(t["id"])
-
-                    key = f"one_{t['id']}"
-                    if st.button("Unduh 1 lagu", key=key, use_container_width=True,
-                                 disabled=(_prefetched_urls() and not t.get("mp3_url"))):
-                        track = by_id.get(t["id"])
-                        if track is None:
-                            st.warning("Data lagu tidak ditemukan.")
-                        else:
-                            try:
-                                with st.spinner(f"Mengunduh {t['title']}…"):
-                                    data = _fetch_mp3_bytes(track)
-                                st.download_button(
-                                    "Simpan MP3", data=data,
-                                    file_name=f"{track.filename}.mp3",
-                                    mime="audio/mpeg", key=f"dl_{t['id']}",
-                                    use_container_width=True)
-                            except Exception as exc:  # noqa: BLE001
-                                st.error(f"Gagal: {type(exc).__name__}: {exc}")
     if not shown:
         st.caption("Tidak ada lagu yang cocok dengan search.")
+        return
+
+    _page, start, end = _pager("songs", len(shown))
+    _render_table_header()
+    for n, t in enumerate(shown[start:end], start + 1):
+        _render_track_table(n, t, sel, by_id)
 
 
 def page_covers() -> None:
@@ -831,8 +1297,10 @@ def page_covers() -> None:
         return
     tracks = view["tracks"]
     with_cover = sum(1 for t in tracks if t.get("cover"))
-    st.caption(f"{with_cover}/{len(tracks)} cover tersedia. Centang cover yang "
-               "diinginkan lalu unduh jadi satu ZIP gambar.")
+    loaded = st.session_state.get("covers_loaded") or 0
+    cap = f" · {loaded} cover album asli sudah dimuat" if loaded else ""
+    st.caption(f"{with_cover}/{len(tracks)} cover tersedia{cap}. Centang cover "
+               "yang diinginkan lalu unduh jadi satu ZIP gambar.")
 
     query = st.text_input("Search cover / lagu / artist…", key="cover_search",
                           placeholder="mis. midnight, afterglows…")
@@ -882,29 +1350,50 @@ def page_covers() -> None:
             st.warning(f"Gagal membaca ZIP cover: {exc}")
 
     st.divider()
-    cols_per_row = 4
-    for i in range(0, len(shown), cols_per_row):
-        cols = st.columns(cols_per_row)
-        for col, t in zip(cols, shown[i:i + cols_per_row]):
+    if not shown:
+        st.caption("Tidak ada cover yang cocok dengan search.")
+        return
+
+    _render_cover_gallery(shown, sel, start_page=0)
+
+
+def _render_cover_gallery(rows: list, sel: set, start_page: int = 0) -> None:
+    """Grid of square covers for the Download Cover page (R2).
+
+    The Download Lagu page is a vertical list (rev #5); this one is a gallery on
+    purpose — artwork reads better side by side, which is what the user asked
+    for. Covers are square via the existing ``.nx9-art-img`` CSS in ui/theme.py.
+    """
+    _page, start, end = _pager("covers", len(rows), per_page=COVERS_PER_PAGE)
+    visible = rows[start:end]
+
+    for i in range(0, len(visible), COVER_COLUMNS):
+        cols = st.columns(COVER_COLUMNS)
+        for col, t in zip(cols, visible[i:i + COVER_COLUMNS]):
             with col:
                 with st.container(border=True):
                     if t.get("cover"):
-                        try:
-                            st.image(t["cover"], use_container_width=True)
-                        except Exception:  # noqa: BLE001
-                            pass
+                        st.markdown(
+                            f'<div class="nx9-art-img">'
+                            f'<img src="{html.escape(t["cover"], quote=True)}" alt="">'
+                            f'</div>', unsafe_allow_html=True)
                     else:
+                        st.markdown('<div class="nx9-art-img"></div>',
+                                    unsafe_allow_html=True)
                         st.caption("(tidak ada cover)")
-                    st.caption(f"**{t['title']}** — {t['artist']}")
-                    checked = st.checkbox("Pilih cover", key=f"cover_sel_{t['id']}",
+                    st.markdown(f"**{t['title']}**")
+                    st.caption(t["artist"])
+                    checked = st.checkbox("Pilih", key=f"cover_sel_{t['id']}",
                                           value=(t["id"] in sel),
                                           disabled=not t.get("cover"))
                     if checked:
                         sel.add(t["id"])
                     else:
                         sel.discard(t["id"])
-    if not shown:
-        st.caption("Tidak ada cover yang cocok dengan search.")
+                    if st.button("Unduh cover", key=f"one_cover_{t['id']}",
+                                 use_container_width=True,
+                                 disabled=not t.get("cover")):
+                        _download_one_cover(t)
 
 
 def page_backup() -> None:
@@ -1024,7 +1513,7 @@ def show_results() -> None:
         if query and query not in f"{track.title} {track.artist}".lower():
             continue
         shown += 1
-        _render_track_row(idx, track)
+        _render_track_row_legacy(idx, track)
     if shown == 0:
         st.caption(L("main.no_match"))
 
@@ -1042,7 +1531,12 @@ def show_results() -> None:
                 st.markdown(f"- {row['time']} **{row['provider']}** `{row['url'][:60]}` - {status}")
 
 
-def _render_track_row(idx: int, track: Track) -> None:
+# NOTE: the legacy single-page UI below has its own `_render_track_row(idx,
+# track)` (line ~1149) which takes a Track, not a view dict. The modern list row
+# above deliberately uses a different name so neither shadows the other.
+
+
+def _render_track_row_legacy(idx: int, track: Track) -> None:
     lang = st.session_state.lang
     L = lambda k, **fmt: i18n.tr(lang, k, **fmt)  # noqa: E731
     info = st.session_state.per_track.get(str(idx), {})
@@ -1115,11 +1609,56 @@ def _resolve_one(idx: int) -> None:
 
 
 def _fetch_bytes(mp3_url: str) -> bytes:
+    """Read the MP3 for one track, whatever shape the provider returned.
+
+    Providers are not uniform about what ``resolve_track`` hands back:
+
+    * ``mock://...``            — the offline Demo provider (placeholder bytes).
+    * **a local file path**     — YouTube/yt-dlp: the search + download + ffmpeg
+      work already happened inside ``resolve_track``, so the "URL" is really a
+      finished file on disk (``C:\\...\\spotify_yt_cache\\x.mp3``). Passing such
+      a path to ``requests.get`` raises ``InvalidSchema``, which is why the
+      Download Lagu page needs this branch.
+    * an ``http(s)://`` URL     — the legacy providers (SpotiDown.co,
+      SoundLoaders, SpotiDown.app) still return a real URL to fetch.
+    """
     if mp3_url.startswith("mock://"):
         return _mock_mp3_bytes()
+
+    # Local file produced by the provider. Path() can raise on Windows for
+    # strings with illegal characters, so never let it kill the request.
+    if _looks_like_filesystem_path(mp3_url):
+        local = None
+        try:
+            local = Path(mp3_url)
+            if local.exists() and local.is_file():
+                data = local.read_bytes()
+                if not data:
+                    raise ServiceError(f"File audio kosong: {local}")
+                return data
+        except ServiceError:
+            raise
+        except Exception:  # noqa: BLE001
+            local = None
+        # It claimed to be a file path but we cannot read it. Say so plainly
+        # instead of letting requests raise InvalidSchema on a bare path.
+        raise ServiceError(
+            f"File audio tidak bisa dibaca: {mp3_url}",
+            details=("provider mengembalikan path lokal, tapi file-nya hilang "
+                     "atau tidak terbaca"),
+        )
+
+    # Legacy providers: a genuine URL.
     resp = requests.get(mp3_url, timeout=60, allow_redirects=True)
     resp.raise_for_status()
     return resp.content
+
+
+def _looks_like_filesystem_path(value: str) -> bool:
+    """True for something that is meant to be a file path, not an HTTP URL."""
+    if not value or "://" in value:
+        return False
+    return bool(re.match(r"^[A-Za-z]:[\\/]|^[\\/]{1,2}", value))
 
 
 def _run_batch(mode: DownloadMode) -> None:

@@ -22,19 +22,45 @@ from typing import List, Optional
 from core.orchestrator import make_provider
 from providers.base import ProviderId, ResolveResult, Track
 
-# Official free-tier limit of spotidown.co (100 tracks per playlist).
-BATCH_LIMIT = 100
+# How many songs go into one ZIP.
+#
+# User rule (2026-10): a playlist of 30 songs or fewer becomes ONE full ZIP;
+# above 30 it is split into parts of 30 songs each. This is the only place the
+# number lives — UI text and tests import it from here.
+PART_SIZE = 30
+
+# Kept as an alias because several modules (and older tests) referenced the old
+# name. Same value; prefer PART_SIZE in new code.
+BATCH_LIMIT = PART_SIZE
 
 DEFAULT_PROVIDER = ProviderId.SPOTIDOWN_CO.value
 
 
 def format_duration(ms: int) -> str:
-    """Milliseconds -> 'm:ss' (providers report duration in ms)."""
+    """Milliseconds -> 'm:ss' (providers report duration in milliseconds)."""
     try:
-        total = max(0, int(ms)) // 1000  # ms -> seconds
+        total_seconds = max(0, int(ms)) // 1000
     except (TypeError, ValueError):
         return ""
-    return f"{total // 60}:{total % 60:02d}"
+    return f"{total_seconds // 60}:{total_seconds % 60:02d}"
+
+
+def format_total_duration(ms: int) -> str:
+    """Milliseconds -> human total, e.g. '4 jam 37 menit' or '45 menit'.
+
+    Used for the playlist header, where minutes-only would read oddly on long
+    playlists.
+    """
+    try:
+        total_minutes = max(0, int(ms)) // 60000
+    except (TypeError, ValueError):
+        return ""
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        return f"{hours} jam {minutes} menit"
+    if hours:
+        return f"{hours} jam"
+    return f"{minutes} menit"
 
 
 def load_playlist(spotify_url: str, provider_id: str = DEFAULT_PROVIDER,
@@ -56,19 +82,43 @@ def load_playlist(spotify_url: str, provider_id: str = DEFAULT_PROVIDER,
     return provider.load_tracks(url)
 
 
-def playlist_view(result: ResolveResult) -> dict:
-    """Flatten a ResolveResult into the dict shape the UI pages expect."""
+def playlist_view(result: ResolveResult, covers: Optional[dict] = None) -> dict:
+    """Flatten a ResolveResult into the dict shape the UI pages expect.
+
+    ``covers`` maps track id -> album cover URL. Anything missing keeps whatever
+    the provider already supplied (the playlist-level image), so a failed cover
+    lookup degrades to "same picture as before" rather than a blank tile.
+    """
     tracks: List[dict] = []
     for t in result.tracks:
-        tracks.append(track_view(t))
+        row = track_view(t)
+        if covers:
+            better = covers.get(row["id"])
+            if better:
+                row["cover"] = better
+        tracks.append(row)
 
     return {
         "url": result.source_url,
         "title": result.title,
         "total_count": len(result.tracks),
+        "total_duration_ms": sum(int(t.duration_ms or 0) for t in result.tracks),
         "hint": result.raw_hint or "",
         "tracks": tracks,
     }
+
+
+def apply_track_covers(view: dict, covers: dict) -> int:
+    """Fill in per-track album covers on an existing view. Returns how many set."""
+    if not covers or not view:
+        return 0
+    n = 0
+    for row in view.get("tracks", []):
+        better = covers.get(row.get("id"))
+        if better and better != row.get("cover"):
+            row["cover"] = better
+            n += 1
+    return n
 
 
 def track_view(track: Track) -> dict:
@@ -101,10 +151,14 @@ def filter_tracks(tracks: List[dict], query: str) -> List[dict]:
 
 
 def _stamp(view: dict) -> str:
+    """One 'judul - artist' line per track, numbered.
+
+    Kept intentionally minimal: the backup is a plain song list, not a
+    database dump. Duration / album / mp3_url were dropped per user request.
+    """
     rows = []
     for i, t in enumerate(view.get("tracks", []), 1):
-        dur = f" ({t['duration']})" if t.get("duration") else ""
-        rows.append(f"{i:02d}. {t['title']} - {t['artist']}{dur}")
+        rows.append(f"{i:02d}. {t.get('title','')} - {t.get('artist','')}")
     return "\n".join(rows)
 
 
@@ -115,12 +169,9 @@ def to_txt(view: dict) -> str:
 
 
 def to_csv(view: dict) -> str:
-    lines = ["no,title,artist,album,duration,mp3_url"]
+    lines = ["no,title,artist"]
     for i, t in enumerate(view.get("tracks", []), 1):
-        lines.append(
-            f'{i},"{t.get("title","")}","{t.get("artist","")}",'
-            f'"{t.get("album","")}","{t.get("duration","")}","{t.get("mp3_url","")}"'
-        )
+        lines.append(f'{i},"{t.get("title","")}","{t.get("artist","")}"')
     return "\n".join(lines)
 
 
@@ -129,9 +180,12 @@ def to_json_obj(view: dict) -> dict:
         "title": view.get("title", ""),
         "source": view.get("url", ""),
         "total_tracks": view.get("total_count", 0),
-        "free_tier_limit": BATCH_LIMIT,
+        "part_size": PART_SIZE,
         "notice": view.get("hint", ""),
-        "tracks": view.get("tracks", []),
+        "tracks": [
+            {"no": i, "title": t.get("title", ""), "artist": t.get("artist", "")}
+            for i, t in enumerate(view.get("tracks", []), 1)
+        ],
     }
 
 

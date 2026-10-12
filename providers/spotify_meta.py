@@ -37,19 +37,31 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from .base import ServiceError, Track
 
 TOKEN_URL = "https://accounts.spotify.com/api/token"
+AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 API_BASE = "https://api.spotify.com/v1"
 TIMEOUT = 20
+
+# Scopes needed to read a user's playlists. Playlist CONTENTS stopped working
+# with Client Credentials in Spotify's Feb 2026 change (401 "Valid user
+# authentication required"), so a user access token is the only way past the
+# 100-item cap that the public embed page imposes.
+USER_SCOPES = "playlist-read-private playlist-read-collaborative"
 
 # Spotify caps playlist item pages at 100.
 PAGE_LIMIT = 100
 # Safety valve: never walk more than this many pages (10k tracks).
 MAX_PAGES = 100
+
+# Cover lookups hit GET /tracks/{id} one at a time. Capped so we never look like
+# a scraper hammering the API; 8 measured ~5x faster than serial for 100 tracks.
+MAX_COVER_WORKERS = 8
 
 
 # --------------------------------------------------------------------------
@@ -92,6 +104,37 @@ def credentials() -> tuple[str, str]:
             details=f"looked for SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET in {Path(__file__).resolve().parents[1] / '.env'}",
         )
     return cid, secret
+
+
+def has_credentials() -> bool:
+    """True when Client Credentials are present. Never raises."""
+    try:
+        credentials()
+        return True
+    except ServiceError:
+        return False
+
+
+def refresh_token_present() -> bool:
+    """True when SPOTIFY_REFRESH_TOKEN is set (enables playlists > 100 songs)."""
+    _load_dotenv()
+    return bool((os.environ.get("SPOTIFY_REFRESH_TOKEN") or "").strip())
+
+
+def authorize_url(redirect_uri: str = "http://localhost:8501") -> str:
+    """Build the Authorization Code URL the user opens once to get a token.
+
+    OPTIONAL feature. Without SPOTIFY_REFRESH_TOKEN the app still works; it just
+    falls back to the public embed page, which caps playlists at 100 songs.
+    """
+    cid, _ = credentials()
+    params = {
+        "client_id": cid,
+        "response_type": "code",
+        "scope": USER_SCOPES,
+        "redirect_uri": redirect_uri,
+    }
+    return AUTHORIZE_URL + "?" + urllib.parse.urlencode(params)
 
 
 # --------------------------------------------------------------------------
@@ -189,7 +232,7 @@ class SpotifyMeta:
     """Thin Spotify Web API client (client-credentials, read-only public data)."""
 
     def __init__(self, client_id: Optional[str] = None, client_secret: Optional[str] = None,
-                 prefer: str = "embed"):
+                 prefer: str = "embed", refresh_token: Optional[str] = None):
         # Explicit empty strings mean "no credentials" (the embed path needs
         # none). None means "load them from .env if available".
         if client_id is not None and client_secret is not None:
@@ -203,6 +246,83 @@ class SpotifyMeta:
         self._token_expiry: float = 0.0
         # "embed" (default, no auth) or "api" (Web API, needs credentials).
         self._prefer = prefer
+        # Header extras recovered from the embed page (owner, total duration).
+        self.last_owner: str = ""
+        self.last_total_duration_ms: int = 0
+        # The playlist's own artwork (prefix ab67706c…). Kept separate from the
+        # per-track album covers (prefix ab67616d…) so the header never shows
+        # someone else's album art.
+        self.last_playlist_cover: str = ""
+        # OPTIONAL user token. Only needed to read past the embed page's
+        # 100-item cap; its absence must never break the normal flow.
+        if refresh_token is None:
+            _load_dotenv()
+            refresh_token = os.environ.get("SPOTIFY_REFRESH_TOKEN") or ""
+        self._refresh_token = str(refresh_token or "").strip()
+        self._user_access_token: str = ""
+        self._user_token_expiry: float = 0.0
+
+    def has_user_token(self) -> bool:
+        """True when a refresh token is configured (playlist >100 supported)."""
+        return bool(self._refresh_token)
+
+    # ------------------------------------------------- user token (optional)
+    def _user_access_token_value(self) -> str:
+        """Exchange the refresh token for a short-lived user access token."""
+        if self._user_access_token and time.time() < self._user_token_expiry - 30:
+            return self._user_access_token
+        if not self._refresh_token:
+            raise ServiceError(
+                "SPOTIFY_REFRESH_TOKEN belum diisi. Playlist publik tetap "
+                "bisa dibaca tanpa token; token hanya diperlukan untuk playlist "
+                "private.",
+                details="no refresh token configured",
+            )
+        cid, secret = self._cid, self._secret
+        if not (cid and secret):
+            cid, secret = credentials()
+        basic = base64.b64encode(f"{cid}:{secret}".encode()).decode()
+        data = urllib.parse.urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": self._refresh_token,
+        }).encode()
+        req = urllib.request.Request(
+            TOKEN_URL, data=data,
+            headers={"Authorization": f"Basic {basic}",
+                     "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+            except Exception:  # noqa: BLE001
+                pass
+            raise ServiceError(
+                "Spotify menolak refresh token. Ambil token baru lewat "
+                "Authorization Code (lihat README bagian 'Hubungkan Spotify').",
+                details=f"HTTP {exc.code}: {detail}",
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ServiceError("Tidak bisa menghubungi Spotify (token endpoint).",
+                               details=str(exc)) from exc
+
+        token = str(payload.get("access_token") or "")
+        if not token:
+            raise ServiceError("Spotify tidak mengirim access_token.",
+                               details=json.dumps(payload)[:300])
+        self._user_access_token = token
+        self._user_token_expiry = time.time() + int(payload.get("expires_in") or 3600)
+        return token
+
+    def _get_user(self, path: str, params: Optional[dict] = None) -> dict:
+        """GET with a USER access token (required for /playlists/{id}/items)."""
+        url = API_BASE + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        return _request(url, {"Authorization": f"Bearer {self._user_access_token_value()}"})
 
     # ---------------------------------------------------------------- auth
     def _access_token(self) -> str:
@@ -281,27 +401,59 @@ class SpotifyMeta:
         )
 
     # --------------------------------------------------------- public API
-    def playlist_tracks(self, url: str, max_items: int = 0) -> tuple[str, List[Track], str]:
+    def playlist_tracks(self, url: str, max_items: int = 0,
+                        progress=None) -> tuple[str, List[Track], str]:
         """Return (title, tracks, hint) for a playlist / album / track URL.
 
-        Strategy: try the public embed page FIRST (no auth, works for public
-        playlists), then fall back to the Web API (needs credentials, only helps
-        for tracks/albums now that /playlists/{id}/items requires a user token).
+        Strategy: try the anonymous embed + spclient chain FIRST (public
+        playlists, no login, no size cap), then fall back to the Web API, and
+        finally to a user token for private playlists.
 
+        ``progress(done, total)`` is forwarded to the per-track metadata fetch.
         ``max_items`` > 0 stops early (useful for testing).
         """
         if self._prefer != "api":
-            try:
-                from .spotify_embed import embed_tracks
+            # ORDER MATTERS (do not reverse):
+            # 1. a user refresh token exists -> Web API with a USER token.
+            #    Now only needed for PRIVATE playlists; public ones don't
+            #    need a login at all any more.
+            # 2. otherwise -> the anonymous embed + spclient chain, which
+            #    reads every song of a PUBLIC playlist with no 100 cap.
+            anonymous_error: Optional[ServiceError] = None
+            if self._refresh_token:
+                try:
+                    return self._playlist_tracks_user(url, max_items)
+                except ServiceError:
+                    pass  # bad/expired token -> fall back to the anonymous path
 
-                title, tracks, hint, _cover = embed_tracks(url, max_items=max_items)
+            try:
+                from .spotify_embed import embed_tracks_complete
+
+                title, tracks, hint, cover, owner, total_ms = embed_tracks_complete(
+                    url, max_items=max_items, progress=progress)
                 if tracks:
+                    # Remember the header extras the UI wants, so it does not
+                    # have to fetch the same embed page a second time.
+                    self.last_owner = owner
+                    self.last_total_duration_ms = total_ms
+                    # The playlist's OWN artwork. Without this the header falls
+                    # back to the first track's album cover, which is someone
+                    # else's image — the user uploaded a playlist cover and
+                    # expects to see it.
+                    self.last_playlist_cover = cover
                     return title, tracks, hint
-            except ServiceError:
-                # Markup changed / network hiccup -> try the Web API instead.
-                pass
+            except ServiceError as exc:
+                # The anonymous path is the ONLY one that reads public playlists
+                # (Client Credentials cannot). So if it fails, do NOT silently
+                # fall through to the app-only Web API: that answers 403 for every
+                # playlist and would report "playlist private" for what is really
+                # a rate limit or a markup change.
+                anonymous_error = exc
 
         if not self._cid or not self._secret:
+            if anonymous_error is not None:
+                # Report what actually went wrong rather than guessing.
+                raise anonymous_error
             raise ServiceError(
                 "Tidak bisa membaca playlist itu. Halaman embed publik Spotify "
                 "tidak tersedia (playlist private atau blokir wilayah), dan "
@@ -310,7 +462,81 @@ class SpotifyMeta:
                 "di sidebar.",
                 details=f"embed failed and no API credentials configured (prefer={self._prefer})",
             )
+
+        # We have app-only credentials, but those cannot read playlist contents
+        # (403 since Feb 2026). Trying anyway turns a rate limit into a
+        # misleading "playlist private" message, so only fall back when the
+        # anonymous path failed for a reason the API might actually handle.
+        if anonymous_error is not None:
+            # The status code lives in the user message for some call sites and
+            # in details for others; check both.
+            blob = f"{anonymous_error.user_message} {anonymous_error.details or ''}"
+            rate_limited = "429" in blob or "membatasi" in blob
+            if not rate_limited:
+                return self._playlist_tracks_api(url, max_items)
+            raise ServiceError(
+                "Spotify sedang membatasi permintaan dari koneksi ini (HTTP 429). "
+                "Itu bukan playlist private — tunggu beberapa menit lalu Load "
+                "Playlist lagi. Playlist yang sudah pernah dimuat tetap bisa "
+                "dilihat dari cache.",
+                details=anonymous_error.details or "",
+            )
         return self._playlist_tracks_api(url, max_items)
+
+    def _playlist_tracks_user(self, url: str, max_items: int = 0) -> tuple[str, List[Track], str]:
+        """Read a playlist with a USER access token — no 100-item cap.
+
+        ``GET /playlists/{id}/items`` only accepts a user token since Spotify's
+        February 2026 change. Paging continues until Spotify stops returning
+        items, so playlists longer than 100 songs load in full.
+        """
+        kind, sid = parse_spotify_url(url)
+        if kind == "track":
+            data = self._get_user(f"/tracks/{sid}")
+            t = self._track_from_item({"item": data})
+            return (str(data.get("name") or "Track"), [t] if t else [], "")
+
+        meta = self._get_user(f"/playlists/{sid}")
+        title = str(meta.get("name") or "Playlist")
+        total = int((meta.get("tracks") or meta.get("items") or {}).get("total") or 0)
+
+        tracks: List[Track] = []
+        hint = ""
+        offset = 0
+        pages = 0
+        while pages < MAX_PAGES:
+            page = self._get_user(f"/playlists/{sid}/items",
+                                  {"limit": PAGE_LIMIT, "offset": offset})
+            pages += 1
+            items = page.get("items") or []
+            if not items:
+                break
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                t = self._track_from_item(it)
+                if t:
+                    tracks.append(t)
+                if max_items and len(tracks) >= max_items:
+                    break
+            if max_items and len(tracks) >= max_items:
+                break
+            if len(items) < PAGE_LIMIT:
+                break
+            offset += PAGE_LIMIT
+
+        self.last_owner = str((meta.get("owner") or {}).get("display_name") or "")
+        self.last_total_duration_ms = sum(int(t.duration_ms or 0) for t in tracks)
+        # Playlist artwork from the user-token response, when there is one.
+        # Deliberately NOT passed through upgrade_cover_url(): playlist images
+        # use the ab67706c… prefix and 404 at the large album prefix.
+        images = meta.get("images") or []
+        if images and isinstance(images[0], dict):
+            self.last_playlist_cover = str(images[0].get("url") or "")
+        if total and len(tracks) < total:
+            hint = (f"Spotify melaporkan {total} lagu, tapi {len(tracks)} yang "
+                    f"berhasil dibaca.")
+        return title, tracks, hint
 
     def _playlist_tracks_api(self, url: str, max_items: int = 0) -> tuple[str, List[Track], str]:
         """Web API implementation (original path)."""
@@ -392,3 +618,58 @@ class SpotifyMeta:
                     f"berhasil dibaca. Sebagian item mungkin lokal, tidak "
                     f"tersedia di region ini, atau dibatasi.")
         return (title, tracks, hint)
+
+    # ------------------------------------------------------- album cover art
+    def track_covers(self, track_ids: List[str], workers: int = 8) -> Dict[str, str]:
+        """Return ``{track_id: album_cover_url}`` via ``GET /tracks/{id}``.
+
+        WHY THIS EXISTS
+        ---------------
+        Spotify's public embed page only carries ONE image for the whole
+        playlist, so every track would end up with the same cover. The real
+        per-album artwork is only available from the Web API, one track per
+        request: ``GET /tracks?ids=a,b,c`` is rejected (403), so batching is not
+        an option.
+
+        Measured cost (2026-10-09, 20 requests): ~243 ms each serially, ~0.9 s
+        for 20 with 8 workers. So 100 tracks is roughly 5 s parallel / 24 s
+        serial — acceptable for a one-off load, hence the worker pool.
+
+        Behaviour: individual failures (deleted track, region lock, network) are
+        SKIPPED, never raised, so the caller can fall back to the playlist cover.
+        """
+        ids = [str(t) for t in track_ids if t]
+        if not ids:
+            return {}
+
+        # Never hammer Spotify: cap the pool at 8.
+        workers = max(1, min(int(workers), MAX_COVER_WORKERS))
+
+        found: Dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(self._one_cover, tid): tid for tid in ids}
+            for fut in as_completed(futures):
+                tid = futures[fut]
+                try:
+                    url = fut.result()
+                except Exception:  # noqa: BLE001 - a single bad track must not
+                    url = ""       # abort the whole batch
+                if url:
+                    found[tid] = url
+        return found
+
+    def _one_cover(self, track_id: str) -> str:
+        """Fetch one track's album cover URL. Returns '' on any failure."""
+        try:
+            data = self._get(f"/tracks/{track_id}")
+        except ServiceError:
+            return ""
+        except Exception:  # noqa: BLE001
+            return ""
+        album = data.get("album") if isinstance(data.get("album"), dict) else {}
+        images = album.get("images") or []
+        # images[] is sorted largest-first; take the biggest that exists.
+        for img in images:
+            if isinstance(img, dict) and img.get("url"):
+                return str(img["url"])
+        return ""

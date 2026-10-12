@@ -1,0 +1,31 @@
+{
+ "name": "Dupe",
+ "title": "Dupe",
+ "subtitle": "31siy2jiykpjmhgercjuh2j2yrbe",
+ "coverArt": {
+  "sources": [
+   {"height": 640, "width": 640, "url": "https://mosaic.scdn.co/640/playlistcover"}
+  ]
+ },
+ "trackList": [
+  {
+   "uri": "spotify:track:70C4NyhjD5OZUMzvWZ3njJ",
+   "uid": "uid1",
+   "title": "Piano Man",
+   "subtitle": "Billy Joel",
+   "duration": 263586,
+   "isPlayable": true,
+   "entityType": "track"
+  },
+  {
+   "uri": "spotify:track:64qfw9JZl3RYCrq4Mn0WvT",
+   "uid": "uid2",
+   "title": "Take A Chance With Me",
+   "subtitle": "NIKI",
+   "duration": 303933,
+   "isPlayable": true,
+   "entityType": "track"
+  }
+ ],
+ "_note": "Trimmed from a real 213-song embed page; the accessToken field below is the anon-token shape, with a FAKE value so nothing sensitive is committed."
+}

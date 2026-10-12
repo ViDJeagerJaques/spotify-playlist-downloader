@@ -1,0 +1,19 @@
+{
+ "type": "track",
+ "title": "hate that i made you love me",
+ "name": "hate that i made you love me",
+ "id": "3iy2QuCtCzpWnR6tia39AB",
+ "uri": "spotify:track:3iy2QuCtCzpWnR6tia39AB",
+ "artists": [
+  {"name": "Ariana Grande", "uri": "spotify:artist:26cJRN9mfFKTKk2All6R4r"}
+ ],
+ "duration": 197949,
+ "releaseDate": {"isoString": "2023-03-10T00:00:00Z"},
+ "coverArt": null,
+ "isPlayable": true,
+ "playabilityReason": "PLAYABLE",
+ "audioPreview": {
+  "format": "MP3_96",
+  "url": "https://p.scdn.co/mp3-preview/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ }
+}

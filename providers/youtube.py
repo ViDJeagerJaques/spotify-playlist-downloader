@@ -158,16 +158,32 @@ class YouTubeClient:
         self.provider = ProviderId.YOUTUBE
         self._timeout = timeout
         self._workers = workers
+        # Kept after load_tracks so the UI can read the playlist owner and total
+        # duration without fetching the embed page a second time.
+        self.last_owner: str = ""
+        self.last_total_duration_ms: int = 0
+        # The playlist's own artwork, so the Home header shows it instead of the
+        # first track's album cover.
+        self.last_playlist_cover: str = ""
         # Populated by resolve_track; the orchestrator asks for these so it can
         # copy a local file instead of issuing an HTTP GET.
         self._local_files: dict[str, str] = {}
 
     # ----------------------------------------------------------- listing
-    def load_tracks(self, spotify_url: str, cftoken: str = "") -> ResolveResult:
-        """Read the song list from Spotify. No browser, no CAPTCHA."""
+    def load_tracks(self, spotify_url: str, cftoken: str = "",
+                    progress=None) -> ResolveResult:
+        """Read the song list from Spotify. No browser, no CAPTCHA.
+
+        ``progress(done, total)`` is forwarded to the metadata fetch, which
+        makes one request per song — worth showing a bar for large playlists.
+        """
         ensure_requirements()
         meta = SpotifyMeta()
-        title, tracks, hint = meta.playlist_tracks(spotify_url)
+        title, tracks, hint = meta.playlist_tracks(spotify_url, progress=progress)
+        # Expose the header extras the embed page already gave us.
+        self.last_owner = getattr(meta, "last_owner", "")
+        self.last_total_duration_ms = getattr(meta, "last_total_duration_ms", 0)
+        self.last_playlist_cover = getattr(meta, "last_playlist_cover", "")
         if not tracks:
             raise ServiceError(
                 "Tidak ada lagu yang bisa dibaca dari link itu. Pastikan "
@@ -254,7 +270,14 @@ class YouTubeClient:
 
     @staticmethod
     def _download(cand: dict, dest: Path, track: Track) -> None:
-        """Download the chosen candidate and convert it to a tagged MP3."""
+        """Download the chosen candidate, convert to MP3, then retag it.
+
+        Order matters. yt-dlp first writes whatever tags YouTube carried
+        (artist = the channel name, e.g. "David Dean Burkhart"), then we
+        overwrite them with Spotify's own metadata via ``providers/tags.py``.
+        Doing it here rather than in the orchestrator keeps one code path: the
+        file is already finished MP3 here, and the orchestrator only stages it.
+        """
         import yt_dlp
 
         vid = cand.get("id") or cand.get("url")
@@ -274,6 +297,9 @@ class YouTubeClient:
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3",
                  "preferredquality": "192"},
+                # Copies YouTube's tags. We overwrite the important ones right
+                # after, so the leftover 'comment' URL is the only trace left —
+                # and that is honest provenance, so it stays.
                 {"key": "FFmpegMetadata"},
             ],
         }
@@ -300,6 +326,27 @@ class YouTubeClient:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if produced != dest:
             shutil.move(str(produced), str(dest))
+
+        # ---- R4: replace YouTube's tags with Spotify's -------------------
+        # Never fatal: a tagging problem must not lose the audio.
+        try:
+            from .tags import write_tags
+
+            report = write_tags(
+                dest,
+                title=track.title,
+                artist=track.artist,
+                album=track.album,
+                year=getattr(track, "year", 0) or 0,
+                track_number=getattr(track, "track_number", 0) or 0,
+                disc_number=getattr(track, "disc_number", 0) or 0,
+                label=getattr(track, "label", "") or "",
+                cover_url=track.thumbnail or "",
+            )
+            print(f"[tags] {track.title}: {report.get('tags')} "
+                  f"cover={report.get('cover')} {report.get('error') or ''}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[tags] gagal menulis tag untuk '{track.title}': {exc}")
 
     # ------------------------------------------- orchestrator integration
     @staticmethod

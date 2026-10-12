@@ -42,8 +42,13 @@ def _real_payload() -> dict:
 
 
 def test_free_tier_limit_is_real():
-    check("co: free tier limit is 100", FREE_TIER_LIMIT == 100, str(FREE_TIER_LIMIT))
-    check("co: BATCH_LIMIT mirrors it", ui_data.BATCH_LIMIT == 100, str(ui_data.BATCH_LIMIT))
+    """The 100-track cap is the SERVICE's limit (spotidown.co free tier).
+
+    Note this is unrelated to ui_data.PART_SIZE, which is the user's own ZIP
+    splitting rule (30 songs per part) and is intentionally different.
+    """
+    check("co: service free tier limit is 100", FREE_TIER_LIMIT == 100, str(FREE_TIER_LIMIT))
+    check("co: zip part size is 30", ui_data.PART_SIZE == 30, str(ui_data.PART_SIZE))
 
 
 def test_parse_real_payload():
@@ -184,16 +189,89 @@ def test_ui_adapter_shapes():
     check("ui: csv preview", "title,artist" in ui_data.to_csv(view))
     obj = ui_data.to_json_obj(view)
     check("ui: json preview", obj["total_tracks"] == len(view["tracks"]))
-    check("ui: parts within limit",
-          all(len(p) <= 100 for p in ui_data.chunk_parts(view["tracks"], ui_data.BATCH_LIMIT)))
+    check("ui: parts within part size",
+          all(len(p) <= ui_data.PART_SIZE
+              for p in ui_data.chunk_parts(view["tracks"], ui_data.PART_SIZE)))
 
 
 def test_chunk_parts_boundary():
+    """30 songs per part; 250 songs -> 9 parts of 30,30,...,10."""
+    size = ui_data.PART_SIZE
     rows = [{"id": str(i)} for i in range(250)]
-    parts = ui_data.chunk_parts(rows, ui_data.BATCH_LIMIT)
-    check("ui: 250 -> 3 parts", len(parts) == 3, str([len(p) for p in parts]))
-    check("ui: sizes 100/100/50", [len(p) for p in parts] == [100, 100, 50],
+    parts = ui_data.chunk_parts(rows, size)
+    expected = [size] * (250 // size) + ([250 % size] if 250 % size else [])
+    check("ui: 250 -> 9 parts", len(parts) == 9, str(len(parts)))
+    check("ui: sizes match expected", [len(p) for p in parts] == expected,
           str([len(p) for p in parts]))
+
+
+def test_chunk_parts_at_threshold():
+    """The user's rule: <= 30 songs is ONE zip, > 30 is split."""
+    rows30 = [{"id": str(i)} for i in range(30)]
+    check("ui: exactly 30 -> 1 part", len(ui_data.chunk_parts(rows30, ui_data.PART_SIZE)) == 1)
+    rows31 = [{"id": str(i)} for i in range(31)]
+    parts = ui_data.chunk_parts(rows31, ui_data.PART_SIZE)
+    check("ui: 31 -> 2 parts", len(parts) == 2, str(len(parts)))
+    check("ui: 31 -> 30 + 1", [len(p) for p in parts] == [30, 1],
+          str([len(p) for p in parts]))
+
+
+def test_backup_export_is_minimal():
+    """#8: the backup carries title + artist only."""
+    view = {
+        "title": "X", "url": "u", "total_count": 2, "hint": "",
+        "tracks": [
+            {"id": "a", "title": "A", "artist": "Ar", "album": "Al",
+             "duration": "3:42", "mp3_url": "http://secret", "cover": "http://c"},
+            {"id": "b", "title": "B", "artist": "Br", "album": "Bl",
+             "duration": "1:00", "mp3_url": "http://secret2", "cover": "http://c2"},
+        ],
+    }
+    csv_text = ui_data.to_csv(view)
+    check("ui: csv header minimal", csv_text.splitlines()[0] == "no,title,artist",
+          csv_text.splitlines()[0])
+    for dropped in ("duration", "album", "mp3_url"):
+        check(f"ui: csv drops {dropped}", dropped not in csv_text)
+    check("ui: csv keeps title+artist", '"A","Ar"' in csv_text, csv_text)
+
+    txt = ui_data.to_txt(view)
+    check("ui: txt line format", "01. A - Ar" in txt, txt)
+    check("ui: txt drops duration", "3:42" not in txt)
+    check("ui: txt drops mp3_url", "http" not in txt)
+
+    obj = ui_data.to_json_obj(view)
+    check("ui: json track keys minimal",
+          set(obj["tracks"][0].keys()) == {"no", "title", "artist"},
+          str(sorted(obj["tracks"][0].keys())))
+    check("ui: json has no mp3_url", "mp3_url" not in json.dumps(obj), json.dumps(obj))
+
+
+def test_format_total_duration():
+    """#3: human total duration for the playlist header."""
+    cases = [
+        (0, "0 menit"),
+        (45 * 60_000, "45 menit"),
+        (60 * 60_000, "1 jam"),
+        (277 * 60_000, "4 jam 37 menit"),
+        (3600 * 1000, "1 jam"),
+    ]
+    for ms, want in cases:
+        got = ui_data.format_total_duration(ms)
+        check(f"ui: duration {ms}ms -> '{want}'", got == want, got)
+
+    check("ui: duration garbage handled", ui_data.format_total_duration("x") == "")
+
+
+def test_single_track_duration_format():
+    # Regression: format_duration takes MILLISECONDS. A 341000 ms track is
+    # "5:41", not "5683:20" — the earlier code divided by 60 without ever
+    # converting ms to seconds.
+    check("ui: 0:00", ui_data.format_duration(0) == "0:00")
+    check("ui: 222000ms -> 3:42", ui_data.format_duration(222_000) == "3:42")
+    check("ui: 65000ms -> 1:05", ui_data.format_duration(65_000) == "1:05")
+    check("ui: 340706ms -> 5:40", ui_data.format_duration(340_706) == "5:40")
+    check("ui: hours", ui_data.format_duration(3_723_000) == "62:03")
+    check("ui: garbage", ui_data.format_duration("abc") == "")
 
 
 def main():
@@ -209,6 +287,10 @@ def main():
     test_download_headers_shape()
     test_ui_adapter_shapes()
     test_chunk_parts_boundary()
+    test_chunk_parts_at_threshold()
+    test_backup_export_is_minimal()
+    test_format_total_duration()
+    test_single_track_duration_format()
     print(f"PASS={len(PASS)} FAIL={len(FAIL)}")
     if FAIL:
         print("Failures:", FAIL)
