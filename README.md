@@ -489,8 +489,8 @@ Tampil juga di UI (expander "Disclaimer & Catatan Legal"):
 Menghasilkan **jendela native** (tanpa console, tanpa browser) berisi app ini.
 
 ```powershell
-# 1. Siapkan ffmpeg dulu (opsional tapi disarankan — 88 MB).
-#    Pakik imageio-ffmpeg: SUDAH DITERUJI bisa encode MP3 (libmp3lame).
+# 1. Siapkan ffmpeg dulu (opsional tapi disarankan - 88 MB).
+#    Pakai imageio-ffmpeg: SUDAH DITERUJI punya encoder libmp3lame.
 .venv\Scripts\python -m pip install imageio-ffmpeg
 .venv\Scripts\python -c "import imageio_ffmpeg,shutil; shutil.copy2(imageio_ffmpeg.get_ffmpeg_exe(),'bin/ffmpeg.exe')"
 
@@ -498,49 +498,70 @@ Menghasilkan **jendela native** (tanpa console, tanpa browser) berisi app ini.
 build_exe.bat          # Windows      (build_exe.sh untuk Linux/macOS)
 ```
 
-Hasil terukur di mesin ini:
+Hasil terukur di mesin ini: **dist/SpotDL.exe = 121,8 MB** (127.716.830 byte),
+lengkap dengan `app.py`, paket `providers/` `ui/` `core/`, dan `bin/ffmpeg.exe`.
 
-| Build | Ukuran |
-|---|---|
-| tanpa ffmpeg | **84,1 MB** |
-| dengan `bin/ffmpeg.exe` | **113,8 MB** |
+### Bukti bahwa halamannya benar-benar jalan
 
-Bukti saat dijalankan: jendela `SpotDL` 1024x768 **visible**, log memuat
-`You can now view your Streamlit app` + `URL: http://localhost:<port>`, dan
-`curl` ke URL itu balas **HTTP 200**.
+`HTTP 200` **bukan bukti**. Streamlit itu SPA: cangkang HTML-nya selalu balas
+200 walaupun aplikasinya kosong. Satu-satunya bukti nyata adalah teks yang
+muncul di dalam `<body>` setelah WebSocket terhubung. Diperiksa dengan Chromium
+headless:
 
-### Dua hal yang mudah salah
-
-**Build `launcher.py`, jangan `app.py`.**
-
-```powershell
-# SALAH — app.py dieksekusi sebagai script biasa, TIDAK ada server, TIDAK ada UI
-pyinstaller app.py --onefile --windowed
-
-# BENAR
-streamlit-desktop-app build launcher.py --name SpotDL --pyinstaller-options --onefile --noconfirm
+```
+body chars  : 483        (blank = belasan karakter)
+markdown    : 27
+sidebar     : 1
+spinner     : 0          (spinner tak pernah hilang = belum render)
+button      : 5
+input       : 7
+teks        : "Spotify Playlist Downloader", "Load Playlist", "Navigasi", "Cache"
 ```
 
-Yang salah akan mencetak `missing ScriptRunContext! running in bare mode` lalu
-keluar. `build_exe.bat` sudah menjalankan yang benar.
+### Dua jebakan yang sudah pernah menggigit
 
-**`app.py` tidak boleh punya BOM UTF-8.** `import app` tetap jalan normal, tapi
-`ast.parse()` — yang dipanggil `streamlit-desktop-app` saat build — menolaknya
-dengan `invalid non-printable character U+FEFF`. Build gagal total padahal
-seluruh test hijau. BOM ini pernah ada dan sudah dibuang; `.gitattributes`
-mencegah editor menulisnya kembali. `build_exe.bat` juga memeriksanya sebelum
-build dan berhenti dengan pesan jelas.
+**1. Target build harus `app.py`.** `streamlit-desktop-app` menyajikan **file
+persis yang kamu berikan ke `build`**:
+
+```python
+# streamlit_desktop_app/core.py
+args = ["streamlit", "run", script_path]
+```
+
+Jadi kalau targetnya sebuah launcher, Streamlit akan menjalankan file itu —
+yang tidak memanggil satu pun `st.*` — dan jendelanya **kosong**, hanya spinner
+"Deploy" yang berputar selamanya. Shell desktop-nya sudah disediakan paket itu
+sendiri (membuat wrapper yang memanggil `start_desktop_app`), jadi kita tidak
+perlu menulis launcher sendiri. Versi launcher yang pernah dipakai ada di
+`docs/launcher.py` sebagai catatan.
+
+**2. `--add-data` wajib untuk tiap paket proyek.** Paket tersebut hanya
+menambahkan **satu file target**. `providers/`, `ui/`, `core/` tidak ikut,
+jadi `app.py` akan `ImportError` saat render pertama:
+
+```
+--add-data "providers;providers"  --add-data "ui;ui"  --add-data "core;core"
+--add-data "bin\ffmpeg.exe;bin"
+```
+
+`build_exe.bat`/`.sh` sudah membawa semuanya, dan **memverifikasi isi arsip
+setelah build** — karena bundle yang kehilangan `app.py` tetap bisa build
+berhasil lalu tampil kosong.
+
+### `app.py` tidak boleh punya BOM UTF-8
+
+`import app` tetap jalan normal, tapi `ast.parse()` — yang dipanggil
+`streamlit-desktop-app` saat build — menolaknya dengan
+`invalid non-printable character U+FEFF`. Build gagal total padahal seluruh
+test hijau. BOM ini pernah ada dan sudah dibuang; `.gitattributes` mencegah
+editor menulisnya kembali. `build_exe.bat` juga memeriksanya sebelum build.
 
 ### Ukuran jendela
 
 `streamlit-desktop-app` membuat **wrapper-nya sendiri** saat build, memakai
-`--name` sebagai judul dan **default 1024x768** — konstanta `WINDOW_WIDTH`/
-`WINDOW_HEIGHT` di `launcher.py` tidak terpakai di dalam `.exe`. Ukuran itu
-hanya berlaku saat menjalankan dari source:
+`--name` sebagai judul dan **default 1024x768**. Build script tidak punya opsi
+untuk mengubahnya, jadi jendela hasil `.exe` selalu 1024x768.
 
-```powershell
-.venv\Scripts\python launcher.py    # jendela "Spotify Playlist Downloader" 1280x860
-```
 
 ### ffmpeg
 
