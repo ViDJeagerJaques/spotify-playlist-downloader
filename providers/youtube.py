@@ -101,7 +101,24 @@ _LYRICS_CHANNEL_HINTS = (
 
 
 def ffmpeg_path() -> Optional[str]:
-    """Return the ffmpeg executable path, or None when it is not installed."""
+    """Locate ffmpeg: a bundled copy first, then whatever is on PATH.
+
+    The desktop build ships ``bin/ffmpeg.exe`` next to the app so it works on a
+    machine with nothing installed. Bundled wins over PATH on purpose: a build
+    has to be reproducible, and the user's own ffmpeg may be a different build
+    (or absent, or 222 MB of codecs the app never uses).
+
+    Resolved relative to the repository root (``providers/`` -> parent), which is
+    also where the frozen executable unpacks its data.
+    """
+    bundled = Path(__file__).resolve().parent.parent / "bin" / "ffmpeg.exe"
+    if bundled.exists():
+        return str(bundled)
+    if bundled_alt := bundled.with_suffix(""):
+        # POSIX / macOS layout, and the extension-less name PyInstaller sometimes
+        # keeps on Windows. Cheap to check, so do it rather than assume Windows.
+        if bundled_alt.exists():
+            return str(bundled_alt)
     return shutil.which("ffmpeg")
 
 
@@ -116,10 +133,10 @@ def ensure_requirements() -> None:
         ) from exc
     if not ffmpeg_path():
         raise ServiceError(
-            "ffmpeg tidak ditemukan di PATH. Provider YouTube butuh ffmpeg untuk "
-            "konversi MP3. Windows: winget install Gyan.FFmpeg  |  "
-            "macOS: brew install ffmpeg  |  Linux: sudo apt install ffmpeg",
-            details="shutil.which('ffmpeg') returned None",
+            "ffmpeg tidak ditemukan. Letakkan binari di folder 'bin/' di "
+            "sebelah app, atau pasang lewat: Windows: winget install Gyan.FFmpeg "
+            "| macOS: brew install ffmpeg | Linux: sudo apt install ffmpeg",
+            details="neither bin/ffmpeg.exe nor shutil.which('ffmpeg') resolved",
         )
 
 

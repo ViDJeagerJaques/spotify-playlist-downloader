@@ -1,0 +1,19 @@
+# Normalise line endings in the repository so a Windows checkout does not
+# rewrite every file, and so the build inputs stay byte-stable.
+#
+# The BOM rule matters more than it looks: app.py used to carry a UTF-8 BOM
+# (EF BB BF). Python imports it fine, but `ast.parse()` — which
+# streamlit-desktop-app runs while building the .exe — rejects it with
+# "invalid non-printable character U+FEFF". That is an invisible bug until the
+# desktop build fails. `working-tree-encoding` is deliberately NOT set to
+# anything: it would have git rewrite files in place, which is exactly what
+# caused the problem in the first place.
+
+* text=auto eol=lf
+
+*.py text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+*.json text eol=lf

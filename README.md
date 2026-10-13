@@ -484,6 +484,76 @@ Tampil juga di UI (expander "Disclaimer & Catatan Legal"):
   CAPTCHA milik Anda sendiri.
 - Tanggung jawab penggunaan ada pada pengguna.
 
+## Build .exe untuk Windows
+
+Menghasilkan **jendela native** (tanpa console, tanpa browser) berisi app ini.
+
+```powershell
+# 1. Siapkan ffmpeg dulu (opsional tapi disarankan — 88 MB).
+#    Pakik imageio-ffmpeg: SUDAH DITERUJI bisa encode MP3 (libmp3lame).
+.venv\Scripts\python -m pip install imageio-ffmpeg
+.venv\Scripts\python -c "import imageio_ffmpeg,shutil; shutil.copy2(imageio_ffmpeg.get_ffmpeg_exe(),'bin/ffmpeg.exe')"
+
+# 2. Build
+build_exe.bat          # Windows      (build_exe.sh untuk Linux/macOS)
+```
+
+Hasil terukur di mesin ini:
+
+| Build | Ukuran |
+|---|---|
+| tanpa ffmpeg | **84,1 MB** |
+| dengan `bin/ffmpeg.exe` | **113,8 MB** |
+
+Bukti saat dijalankan: jendela `SpotDL` 1024x768 **visible**, log memuat
+`You can now view your Streamlit app` + `URL: http://localhost:<port>`, dan
+`curl` ke URL itu balas **HTTP 200**.
+
+### Dua hal yang mudah salah
+
+**Build `launcher.py`, jangan `app.py`.**
+
+```powershell
+# SALAH — app.py dieksekusi sebagai script biasa, TIDAK ada server, TIDAK ada UI
+pyinstaller app.py --onefile --windowed
+
+# BENAR
+streamlit-desktop-app build launcher.py --name SpotDL --pyinstaller-options --onefile --noconfirm
+```
+
+Yang salah akan mencetak `missing ScriptRunContext! running in bare mode` lalu
+keluar. `build_exe.bat` sudah menjalankan yang benar.
+
+**`app.py` tidak boleh punya BOM UTF-8.** `import app` tetap jalan normal, tapi
+`ast.parse()` — yang dipanggil `streamlit-desktop-app` saat build — menolaknya
+dengan `invalid non-printable character U+FEFF`. Build gagal total padahal
+seluruh test hijau. BOM ini pernah ada dan sudah dibuang; `.gitattributes`
+mencegah editor menulisnya kembali. `build_exe.bat` juga memeriksanya sebelum
+build dan berhenti dengan pesan jelas.
+
+### Ukuran jendela
+
+`streamlit-desktop-app` membuat **wrapper-nya sendiri** saat build, memakai
+`--name` sebagai judul dan **default 1024x768** — konstanta `WINDOW_WIDTH`/
+`WINDOW_HEIGHT` di `launcher.py` tidak terpakai di dalam `.exe`. Ukuran itu
+hanya berlaku saat menjalankan dari source:
+
+```powershell
+.venv\Scripts\python launcher.py    # jendela "Spotify Playlist Downloader" 1280x860
+```
+
+### ffmpeg
+
+`providers/youtube.py::ffmpeg_path()` mencari `bin/ffmpeg.exe` lebih dulu, baru
+PATH. Build script meneruskan `--add-data` supaya binary ikut terbawa — tanpa
+itu PyInstaller **tidak** mengambil binary yang sekadar ada di disk, dan `.exe`
+akan gagal saat download di PC tanpa ffmpeg.
+
+Gunakan build **imageio-ffmpeg (88 MB)**, bukan build "minimal" 4 MB: yang
+minimal **tidak punya `libmp3lame`** dan konversi MP3-nya gagal total.
+
+---
+
 ## Test
 
 ```powershell

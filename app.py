@@ -1,4 +1,4 @@
-﻿"""Spotify Playlist Downloader — Streamlit UI (personal use).
+"""Spotify Playlist Downloader — Streamlit UI (personal use).
 
 Architecture
 ------------
