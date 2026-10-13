@@ -2,7 +2,14 @@
 REM ===========================================================================
 REM Build the Windows desktop executable.
 REM
-REM Produces dist\SpotDL.exe -- a native window, no console.
+REM Produces dist\SpotDL.exe -- a native window and NO console.
+REM
+REM --windowed is what makes that true. Without it PyInstaller builds a *console*
+REM application (PE subsystem 3), so Windows attaches a black terminal window to
+REM it. That terminal does not close when the app window is closed, so the user
+REM has to kill both by hand. With the flag the PE subsystem is 2 (GUI) and
+REM closing the window takes the whole process tree with it -- measured: 0
+REM processes left about 4 seconds after sending WM_CLOSE.
 REM
 REM WHY THE TARGET IS app.py
 REM -----------------------
@@ -104,8 +111,13 @@ echo.
 echo === Building ======================================================
 REM --onefile  : single .exe, no folder of side-car files.
 REM --noconfirm: overwrite a previous build without prompting.
+REM --windowed : no console window. Without it PyInstaller builds a console
+REM              application, so Windows attaches a black terminal that does not
+REM              close when the app window does -- the user has to kill both by
+REM              hand. Verified: with the flag, closing the window takes the whole
+REM              process tree with it (0 processes left after ~4s).
 REM PyInstaller separates source from destination with a semicolon on Windows.
-"%SDA%" build app.py --name SpotDL --pyinstaller-options --onefile --noconfirm --add-data "providers;providers" --add-data "ui;ui" --add-data "core;core" %ADDFFMPEG%
+"%SDA%" build app.py --name SpotDL --pyinstaller-options --onefile --noconfirm --windowed --add-data "providers;providers" --add-data "ui;ui" --add-data "core;core" %ADDFFMPEG%
 if errorlevel 1 (
     echo [FAIL] build gagal. Scroll ke atas untuk pesan PyInstaller.
     exit /b 1
@@ -118,6 +130,17 @@ REM renders a blank window. Read the archive and confirm the real files.
 "%PY%" -c "from PyInstaller.archive.readers import CArchiveReader as R; import sys; t=list(R('dist/SpotDL.exe').toc); b=[] if 'app.py' in t else b+['app.py']; [b.append(m) for m in ('providers','ui','core') if not [x for x in t if x.lower().startswith(m+chr(92))]]; print('  bundle    :', 'OK' if not b else 'HILANG '+','.join(b)); sys.exit(1 if b else 0)"
 if errorlevel 1 (
     echo [FAIL] bundle tidak lengkap - executable akan tampil kosong.
+    exit /b 1
+)
+
+echo.
+echo === Verifying the PE subsystem ====================================
+REM 2 = GUI subsystem (no console). 3 = console subsystem, which is what makes
+REM Windows attach a black terminal window that survives the app window closing.
+REM Catching it here means the bug cannot come back unnoticed.
+"%PY%" -c "import struct,sys; d=open('dist/SpotDL.exe','rb').read(0x200); o=struct.unpack_from('<I',d,0x3C)[0]; s=struct.unpack_from('<H',d,o+0x5C)[0]; print('  subsystem :', s, '->', 'GUI (tanpa konsol)' if s==2 else 'CONSOLE'); sys.exit(0 if s==2 else 1)"
+if errorlevel 1 (
+    echo [FAIL] executable dibangun sebagai aplikasi konsol - flag --windowed hilang.
     exit /b 1
 )
 

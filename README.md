@@ -498,8 +498,26 @@ Menghasilkan **jendela native** (tanpa console, tanpa browser) berisi app ini.
 build_exe.bat          # Windows      (build_exe.sh untuk Linux/macOS)
 ```
 
-Hasil terukur di mesin ini: **dist/SpotDL.exe = 121,8 MB** (127.716.830 byte),
+Hasil terukur di mesin ini: **dist/SpotDL.exe = 121,8 MB** (127.712.405 byte),
 lengkap dengan `app.py`, paket `providers/` `ui/` `core/`, dan `bin/ffmpeg.exe`.
+
+### Tidak ada jendela terminal hitam
+
+Build memakai `--windowed`. Tanpa flag itu PyInstaller membuat *console
+application* (PE subsystem 3) sehingga Windows menempelkan jendela terminal
+hitam yang **tidak ikut tertutup** saat jendela aplikasi ditutup — user harus
+mematikan keduanya lewat Task Manager. Dengan flag tersebut subsystem jadi 2
+(GUI) dan menutup jendela aplikasi akan menjatuhkan seluruh process tree —
+diukur: 3 proses → 2 → 0 (≈5 detik), 0 port tersisa milik proses itu.
+
+`build_exe.bat`/`.sh` memverifikasi nilai subsystem PE setelah build, jadi bug ini
+tidak bisa kembali diam-diam.
+
+> **Trade-off:** karena executable-nya GUI, `print()` dari Streamlit tidak punya
+> console tujuan, jadi **log startup tidak muncul lagi** di file maupun di layar.
+> Itu konsekuensi langsung dari menghapus terminalnya. Kalau perlu diagnosis,
+> jalankan dari source (`python -m streamlit run app.py`) yang lognya tetap
+> tampil.
 
 ### Bukti bahwa halamannya benar-benar jalan
 

@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # Build the desktop executable (POSIX equivalent of build_exe.bat).
 #
-# Produces dist/SpotDL -- a native window, no console.
+# Produces dist/SpotDL -- a native window and NO console.
+#
+# --windowed is what makes that true. Without it PyInstaller builds a *console*
+# application (PE subsystem 3), so Windows attaches a black terminal window to
+# it. That terminal does not close when the app window is closed, so the user
+# has to kill both by hand. With the flag the PE subsystem is 2 (GUI) and
+# closing the window takes the whole process tree with it -- measured: 0
+# processes left about 4 seconds after sending WM_CLOSE.
 #
 # WHY THE TARGET IS app.py
 # -----------------------
@@ -72,20 +79,34 @@ echo
 echo "=== Building ======================================================"
 # --onefile   : single binary, no side-car folder
 # --noconfirm : overwrite a previous build without prompting
+# --windowed  : no console window. Without it PyInstaller builds a console
+#               application, so Windows attaches a black terminal that does not
+#               close when the app window does -- the user has to kill both by
+#               hand. Verified: with the flag, closing the window takes the whole
+#               process tree with it (0 processes left after ~4s).
 streamlit-desktop-app build app.py \
     --name SpotDL \
-    --pyinstaller-options --onefile --noconfirm \
+    --pyinstaller-options --onefile --noconfirm --windowed \
     "${ADD_DATA[@]}"
+
+# PyInstaller appends .exe on Windows only, so resolve the path once and reuse it
+# everywhere instead of half the script checking "dist/SpotDL" and half checking
+# "dist/SpotDL.exe".
+EXE=dist/SpotDL
+[ -f dist/SpotDL.exe ] && EXE=dist/SpotDL.exe
+export EXE
 
 echo
 echo "=== Verifying the bundle ========================================="
-# Size alone proves nothing -- a bundle missing app.py still builds fine and then
+# Size alone proves nothing -- a bundle missing app.py builds fine and then
 # renders a blank window. Read the archive and confirm the real files.
 python - <<'PY'
+import os
 import sys
 from PyInstaller.archive.readers import CArchiveReader
 
-toc = list(CArchiveReader('dist/SpotDL.exe').toc)
+exe = os.environ.get("EXE", "dist/SpotDL")
+toc = list(CArchiveReader(exe).toc)
 bad = []
 if 'app.py' not in toc:
     bad.append('app.py')
@@ -101,8 +122,29 @@ sys.exit(1 if bad else 0)
 PY
 
 echo
-echo "=== Result ========================================================"
-[ -f dist/SpotDL ] || { echo "[FAIL] dist/SpotDL was not produced"; exit 1; }
-ls -lh dist/SpotDL
+echo "=== Verifying the PE subsystem ===================================="
+# 2 = GUI subsystem (no console). 3 = console subsystem, which is what makes
+# Windows attach a black terminal window that survives the app window closing.
+# Catching it here means the bug cannot come back unnoticed.
+python - <<'PY'
+import os
+import struct
+import sys
+
+exe = os.environ.get("EXE", "dist/SpotDL")
+d = open(exe, 'rb').read(0x200)
+pe = struct.unpack_from('<I', d, 0x3C)[0]
+subsystem = struct.unpack_from('<H', d, pe + 0x5C)[0]
+print('  subsystem :', subsystem, '->',
+      'GUI (no console)' if subsystem == 2 else 'CONSOLE')
+if subsystem != 2:
+    print('[FAIL] built as a console app -- --windowed is missing')
+    sys.exit(1)
+PY
+
 echo
-echo "Run dist/SpotDL to open the application window."
+echo "=== Result ========================================================"
+[ -f "$EXE" ] || { echo "[FAIL] $EXE was not produced"; exit 1; }
+ls -lh "$EXE"
+echo
+echo "Run $EXE to open the application window."
