@@ -79,7 +79,12 @@ def test_missing_next_data_raises_clear_error():
     except ServiceError as exc:
         msg = exc.user_message
         check("embed: missing __NEXT_DATA__ raises", True)
-        check("embed: error mentions SpotiDown fallback", "SpotiDown.co" in msg, msg[:90])
+        # Was "mentions SpotiDown fallback" — that backend no longer exists, and
+        # pointing the user at a removed option is worse than saying nothing.
+        check("embed: error no longer points at removed backends",
+              "SpotiDown" not in msg and "SoundLoaders" not in msg, msg[:90])
+        check("embed: error points at something that still exists",
+              ".env" in msg, msg[:90])
         check("embed: error is actionable", "berubah bentuk" in msg, msg[:90])
 
 

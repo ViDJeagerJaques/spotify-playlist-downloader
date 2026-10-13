@@ -112,8 +112,8 @@ def parse_embed_page(html: str) -> dict:
     if not m:
         raise ServiceError(
             "Halaman embed Spotify berubah bentuk, jadi playlist tidak bisa "
-            "dibaca tanpa login. Coba backend SpotiDown.co di sidebar, atau "
-            "pakai link album / link lagu (bukan playlist).",
+            "dibaca tanpa login. Pakai link album / link lagu (bukan playlist), "
+            "atau isi credential Web API di .env.",
             details="__NEXT_DATA__ script block not found on the embed page",
         )
     try:
@@ -377,7 +377,7 @@ def _cap_hint(shown: int, cap: int) -> str:
     """Honest message when we only have the embed page's first N songs."""
     return (f"Hanya {shown} lagu yang terbaca (batas {cap} dari halaman embed "
             f"publik Spotify). Sisanya tidak bisa dibaca tanpa login — pakai "
-            f"panel \"Hubungkan Spotify\" di bawah, atau backend SpotiDown.co.")
+            f"panel \"Hubungkan Spotify\" di bawah untuk daftar lengkap.")
 
 
 def embed_tracks_detailed(url: str, max_items: int = 0) -> tuple:
@@ -440,7 +440,7 @@ def embed_tracks_detailed(url: str, max_items: int = 0) -> tuple:
                 f"item per halaman). Sisanya tidak bisa dibaca tanpa login "
                 f"Spotify. Struktur app ini membatasi {EMBED_ITEM_LIMIT} lagu "
                 f"per batch — untuk playlist lebih besar, pecah jadi beberapa "
-                f"playlist atau pakai backend SpotiDown.co.")
+                f"playlist.")
 
     return title, tracks, hint, cover, owner, total_ms
 

@@ -1,9 +1,8 @@
-"""Shared data types, enums and errors for the third-party providers.
+"""Shared data types, enums and errors for the providers.
 
-This app is deliberately NOT a from-scratch Spotify scraper. It only talks to
-external download services (SoundLoaders / SpotiDown) that already resolved the
-Spotify URL server-side. Everything in ``providers/`` is a thin HTTP client for
-one of those services.
+This app is deliberately NOT a from-scratch Spotify scraper. The track list is
+read from Spotify's own public embed page (plus an optional Web API login), and
+the audio itself comes from YouTube via ``yt-dlp``.
 """
 from __future__ import annotations
 
@@ -35,13 +34,17 @@ def cache_dir() -> Path:
 
 
 class ProviderId(str, Enum):
-    """Identifier of the third-party backend that powers the download."""
+    """Download backend.
 
-    SOUNDLOADERS = "soundloaders"
-    SPOTIDOWN = "spotidown"
-    SPOTIDOWN_CO = "spotidown_co"   # spotidown.co (browser-driven; see spotidown_co.py)
-    YOUTUBE = "youtube"             # Spotify metadata + yt-dlp audio (deployable)
-    MOCK = "mock"
+    ``YOUTUBE`` is the only real one. The token-based third-party services
+    (SoundLoaders / SpotiDown / SpotiDown.co) were removed because they no longer
+    work: leaving them selectable was worse than useless, since picking one
+    silently produced nothing. ``MOCK`` stays because the offline test suite
+    drives the whole orchestrator through it.
+    """
+
+    YOUTUBE = "youtube"   # Spotify metadata + yt-dlp audio
+    MOCK = "mock"         # offline tests
 
 
 @dataclass
@@ -54,8 +57,8 @@ class Track:
     artist: str = "Unknown"
     thumbnail: str = ""
     mp3_url: Optional[str] = None  # set after resolve_track succeeds
-    # Optional metadata. Providers that return richer JSON (spotidown.co) fill
-    # these in; the older HTML-scraping providers leave them at their defaults.
+    # Optional metadata. Spotify's own metadata endpoints fill these in; they
+    # stay at their defaults when the public page does not describe the track.
     duration_ms: int = 0          # track length in milliseconds (0 = unknown)
     album: str = ""               # album title when the provider reports one
     # Tagging metadata (R4). Populated from the anonymous Spotify metadata
@@ -95,15 +98,13 @@ class ServiceError(Exception):
 
 
 class CaptchaRequiredError(ServiceError):
-    """The provider rejected the request because it needs a valid captcha token.
+    """A request was rejected because it needed a captcha token.
 
-    Raised whenever a request has no usable token, or the service says the token
-    is wrong/expired. SoundLoaders currently requires Cloudflare Turnstile;
-    SpotiDown requires reCAPTCHA v3.
-
-    These tokens are single-use and short-lived, so this error is retryable:
-    the user solves the CAPTCHA again for a fresh token and the failed action
-    is retried (see BatchOrchestrator.retry_failed).
+    No current backend raises this: YouTube needs no token at all. It is kept
+    because the orchestrator's retry path and the UI's error rendering are both
+    built around it, and a future token-gated backend should not have to
+    reinvent that machinery. ``retryable_after_refresh`` tells the retry loop to
+    offer a "get a fresh token and try again" action.
     """
 
     retryable_after_refresh = True

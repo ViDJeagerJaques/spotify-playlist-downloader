@@ -2,31 +2,26 @@
 
 Flow
 ----
-1. A provider (SoundLoaders / SpotiDown) has already produced ``tracks`` from the
-   Spotify URL. This module loops over them and calls the provider's
-   ``resolve_track`` once per track (the same thing SoundLoaders' own UI does
-   one by one).
-2. Each resolved MP3 URL is either kept as-is or streamed into a local temp
-   file (see ``DownloadMode``).
+1. The YouTube provider has already produced ``tracks`` from the Spotify URL. This
+   module loops over them and calls ``resolve_track`` once per track.
+2. Each resolved path is either kept as-is or copied into a local staging folder
+   under the project's cache dir (see ``DownloadMode``).
 3. After every track has been processed the orchestrator can bundle the local
    files into a single ZIP that the Streamlit UI offers as one download.
 
 Why we build the ZIP ourselves
 ------------------------------
-Both services ship their own "batch" endpoints (SoundLoaders /action/tracks for
-each row; SpotiDown /action/bulktrack + /action/create_zip). SpotiDown's ZIP
-endpoint is gated (free users get 5 tracks) — see providers/spotidown.py. So the
-app resolves per track with the *free* single-track endpoints and does ZIP
-packaging locally. That keeps the app free of any third-party premium gate.
+``yt-dlp`` has no batch endpoint: a playlist is resolved one track at a time. So
+the app does exactly that and packages the results into a ZIP locally.
 
 Provider flavours handled here
 ------------------------------
-* **Per-track resolve** (SoundLoaders, SpotiDown.app): every track needs its own
-  request to obtain the MP3 URL.
-* **Prefetched URLs** (spotidown.co): the listing response already contains the
-  MP3 URL for each track, so the orchestrator reuses ``track.mp3_url`` and never
-  calls ``resolve_track()``. Its downloads go through ``ResilientFileFetcher``
-  because that CDN rejects a random share of requests (see that class).
+* **Per-track resolve** (YouTube, the only real backend): every track needs its
+  own search + download + convert.
+* **Prefetched URLs**: a provider that already fills ``track.mp3_url`` during
+  listing skips ``resolve_track()`` entirely. YouTube does not — it builds the
+  MP3 locally — so the flag is ``False`` there. The branch is kept because the
+  attribute is part of the provider contract, not because YouTrip uses it.
 """
 from __future__ import annotations
 
@@ -127,14 +122,16 @@ class LocalFileFetcher:
 class ResilientFileFetcher:
     """Fetcher for providers whose CDN rejects a random share of requests.
 
-    ``spotidown.co`` hands out ``audio.url`` values that 302-redirect to a CDN
-    (``*.123tokyo.xyz``). That CDN intermittently answers 403/5xx under load, and
-    *which* URLs fail changes on every run — it is not a property of the track.
-    So we retry with a growing delay plus jitter, and skip files that already
-    exist so a re-run only fetches what is missing.
+    Built for a third-party CDN that 302-redirects to a host intermittently
+    answering 403/5xx, and where *which* URLs fail changes on every run — it is
+    not a property of the track. So we retry with a growing delay plus jitter,
+    and skip files that already exist so a re-run only fetches what is missing.
 
-    The provider supplies the required ``Origin``/``Referer``/UA headers (the CDN
-    answers 403 without them) via ``provider.download_headers()``.
+    No current backend needs it: YouTube resolves to a local file rather than an
+    HTTP URL, and the mock provider returns bytes in-process. It stays because
+    the orchestrator still picks a fetcher via ``provider.download_headers()``,
+    and because removing it would mean deleting a working retry-with-backoff
+    implementation that a future URL-based backend would just have to rewrite.
     """
 
     def __init__(self, headers: Optional[dict] = None, attempts: int = 4,
@@ -249,9 +246,10 @@ class BatchOrchestrator:
         Returns the MP3 URL. Raises CaptchaRequiredError when the token was
         rejected, anything else for service/fetch problems.
 
-        Providers that advertise ``prefetched_urls`` (spotidown.co) already put
-        the MP3 URL on the Track during load_tracks(), so we reuse it instead of
-        spending a pointless resolve request per track.
+        Providers that advertise ``prefetched_urls`` already put the MP3 URL on
+        the Track during load_tracks(), so we reuse it instead of spending a
+        pointless resolve request per track. YouTube does not — it advertises
+        ``False`` and builds the file locally inside ``resolve_track``.
         """
         if getattr(self.provider, "prefetched_urls", False) and track.mp3_url:
             mp3_url = track.mp3_url
@@ -481,15 +479,11 @@ class BatchOrchestrator:
 
 
 def make_provider(kind: str):
-    from providers.soundloaders import SoundLoadersClient
-    from providers.spotidown import SpotiDownClient
-    from providers.spotidown_co import SpotiDownCoClient
+    # Imported here rather than at module scope so that ``import app`` does not
+    # pull in yt-dlp until a download is actually attempted.
     from providers.youtube import YouTubeClient
 
     mapping = {
-        ProviderId.SOUNDLOADERS.value: SoundLoadersClient,
-        ProviderId.SPOTIDOWN.value: SpotiDownClient,
-        ProviderId.SPOTIDOWN_CO.value: SpotiDownCoClient,
         ProviderId.YOUTUBE.value: YouTubeClient,
         ProviderId.MOCK.value: MockProvider,
     }

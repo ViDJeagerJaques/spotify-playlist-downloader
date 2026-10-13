@@ -22,10 +22,12 @@ benar** ke file hasilnya (judul, artist, album, label, tahun, cover).
 | Backend | Status | Catatan |
 |---|---|---|
 | **YouTube via yt-dlp** | **default** | Tanpa browser, tanpa CAPTCHA, jalan di VPS |
-| SpotiDown.co | legacy | Butuh Chrome terpasang & jendela terbuka |
-| SoundLoaders | legacy | Butuh token Cloudflare manual |
-| SpotiDown.app | legacy | Butuh token reCAPTCHA manual |
 | Demo (Mock) | offline | Data contoh, tanpa jaringan |
+
+> **Dihapus:** SpotiDown.co, SoundLoaders, dan SpotiDown.app. Ketiganya butuh
+> token CAPTCHA atau jendela Chrome yang terbuka, dan semuanya sudah mati.
+> Menawarkannya di dropdown hanya menghasilkan error kosong, jadi opsinya
+> dihapus — bukan disembunyikan. Lihat [Riwayat perubahan](# riwayat-penghentian-backend) di bawah.
 
 ## Instalasi
 
@@ -182,10 +184,6 @@ providers/
   spotify_spclient.py <-- DEPENDENCY: spclient Spotify (playlist penuh + album/label)
   tags.py                    tulis tag ID3 + cover ke MP3
   spotify_meta.py    <-- DEPENDENCY: Spotify Web API (fallback, butuh .env)
-  spotidown_co.py    <-- DEPENDENCY: Chrome via CDP ke spotidown.co (legacy)
-  soundloaders.py    <-- DEPENDENCY: request ke SoundLoaders (legacy)
-  spotidown.py       <-- DEPENDENCY: request ke spotidown.app (legacy)
-  parsing.py                 parser HTML toleran (markup bisa berubah)
   mock.py                    provider demo tanpa jaringan
 ui/
   data.py                    adapter hasil provider -> dict untuk 5 halaman UI
@@ -194,18 +192,15 @@ ui/
 .streamlit/
   config.toml                tema NX9 (warna Streamlit)
 tests/
-  smoke.py                   unit fungsional (parser, orchestrator, i18n)
-  test_youtube.py            unit provider YouTube (scoring, lokal, ffmpeg)
+  smoke.py                   unit fungsional (orchestrator, i18n, retry)
+  test_youtube.py            unit provider YouTube (scoring channel, cache, lokal)
   test_spotify_embed.py      unit parser embed + fixture nyata
-  test_spotidown_co.py       unit provider SpotiDown.co (legacy) + util ZIP/backup
   test_covers.py             cover album per lagu, cache, paruh-paral
   test_fetch_bytes.py        unduh 1 lagu (path lokal / URL / mock)
   test_oauth.py              jalur user-token opsional untuk playlist >100
   test_theme.py              token & CSS NX9, kontras, tanpa WebGL
   test_app.py                end-to-end 5 halaman (AppTest, Mock provider)
   fixtures/                  payload nyata yang tertangkap, untuk test offline
-tools/
-  spotidown_grab.py          skrip CLI referensi (legacy, tidak dipakai app)
 ```
 
 ### Halaman UI
@@ -416,12 +411,15 @@ gambar biasa, tanpa auth, CORS terbuka.
 Tercantum di `requirements.txt`:
 
 - `streamlit` — web UI
-- `yt-dlp` — search & download audio dari YouTube
-- `requests` — HTTP client (cover art, provider legacy)
-- `beautifulsoup4` — parsing HTML respon provider
+- `yt-dlp` — search & download audio dari YouTube (satu-satunya jalur download)
+- `requests` — HTTP client (cover art)
+- `beautifulsoup4` — parsing HTML halaman embed publik Spotify
 - `lxml` — parser HTML cepat untuk BeautifulSoup (fallback ke `html.parser`)
 - `jinja2` — dependency ekosistem Streamlit
-- `playwright` — hanya untuk backend legacy SpotiDown.co
+- `mutagen` — tulis tag ID3 + cover ke MP3
+
+`playwright` **tidak** dipakai lagi. Tidak ada browser yang dijalankan di titik
+mana pun.
 
 ### Di mana ketergantungan ke layanan luar berada
 
@@ -429,121 +427,44 @@ Tercantum di `requirements.txt`:
 - **Spotify** — hanya di `providers/spotify_embed.py` (halaman embed publik)
   dan `providers/spotify_meta.py` (Web API). Baca docstring `DEPENDENCY NOTE`
   di masing-masing.
-- **spotidown.co** — hanya di `providers/spotidown_co.py`.
-- **SoundLoaders / spotidown.app** — hanya di `providers/soundloaders.py` dan
-  `providers/spotidown.py`.
 
-### Backend legacy SpotiDown.co
+### Riwayat penghentian backend
 
-Masih bisa dipilih di sidebar, dan butuh:
+Dulu ada tiga backend pihak ketiga selain YouTube. Semuanya dihapus karena
+**sudah mati**, bukan karena ukurannya:
 
-- **Chrome terpasang**, jendela **terbuka terlihat** (tidak headless) — syarat
-  mutlak, Cloudflare menolak browser yang terdeteksi otomatisasi.
-- Jangan tutup/minimize jendela Chrome saat proses berjalan.
-- Provider menjalankan Chrome sendiri lalu attach via CDP
-  (`--remote-debugging-port`). **Jangan** menggantinya dengan
-  `playwright.chromium.launch()` — selalu ditolak Cloudflare.
-- Hanya boleh satu tab spotidown.co terbuka.
-- `/search` sesekali membalas HTTP 500 lalu berhasil di percobaan berikutnya;
-  provider otomatis reload dan mencoba lagi (maks 4×).
-- Link MP3 cepat kedaluwarsa → download harus langsung setelah playlist dimuat.
+| Backend | Kenapa mati | Sisa-sisanya |
+|---|---|---|
+| SpotiDown.co | Butuh Chrome terpasang & jendela terlihat terbuka, dan CDN-nya (*.123tokyo.xyz) menolak sebagian request secara acak | ResilientFileFetcher + percabangan prefetched_urls di orchestrator |
+| SoundLoaders | Cloudflare Turnstile, token single-use & kedaluwarsa ~5 menit | CaptchaRequiredError + jalur retry |
+| SpotiDown.app | reCAPTCHA v3 + cookie sesi browser | `CaptchaRequiredError` + jalur retry |
 
-### Backend legacy SoundLoaders / SpotiDown.app
+Yang **tidak** ikut dihapus karena masih berguna:
 
-Keduanya butuh token CAPTCHA yang **terikat session browser** pemegangnya, jadi
-tidak bisa dipakai dari proses server — itu alasan utama keduanya tidak lagi
-jadi default. Token hanya bisa dibuat oleh widget aslinya di browser; app
-menyediakan snippet console (F12) untuk mengambilnya, tidak auto-solve.
+- CaptchaRequiredError — tidak ada backend sekarang yang melemparnya, tapi
+  jalur retry orchestrator dan tampilan error di UI dibangun di atasnya.
+- ResilientFileFetcher — YouTube mengembalikan file lokal, bukan URL, jadi ini
+  tidak terpakai. Tapi ini implementasi retry-with-backoff yang masih jalan dan
+  orchestrator masih memilih fetcher lewat provider.download_headers().
+- Percabangan `prefetched_urls` — masih bagian kontrak provider (`YouTubeClient`
+  mengadvertises `False`).
+- Semua string i18n dan terjemahan help_token yang tidak lagi terpakai.
 
-<details>
-<summary>Detail alur token CAPTCHA (backend legacy)</summary>
-
-Verifikasi nyata:
-
-- SoundLoaders kini memakai **Cloudflare Turnstile** (sitekey ada di halamannya).
-  Route lama `POST /api/userverify` — yang ada di PRD — sudah **404** (kode
-  fallback di `script.js` mereka juga dead code). Tanpa token Turnstile,
-  `POST /action` menjawab `{"status":false,"error":"CAPTCHA verification failed."}`.
-- SpotiDown memakai **Google reCAPTCHA v3** + hidden field `_uMihH`. Tanpa token,
-  `POST /action` menjawab `{"error":true,"message":"Please Refresh the page &
-  try again.","errorcode":"error_token"}`.
-
-Token captcha hanya bisa dibuat widget captcha di browser asli — tidak ada API
-server-side murni yang sah. Karena itu app ini **tidak auto-solve**; sidebar
-menyediakan kolom token opsional (BYO) plus **snippet console (F12)** untuk
-mengambil token dari browser Anda.
-
-#### Cara mengambil token CAPTCHA (BYO flow yang benar)
-
-> ⚠️ Token Turnstile/reCAPTCHA **hanya berlaku SATU KALI & ±5 menit**
-> (aturan Cloudflare/Google). Sekali token dikirim ke situsnya, token itu
-> hangus untuk app (`timeout-or-duplicate`). Snippet di app ini **tidak pernah
-> auto-submit form** (itu penyebab redirect anti-bot dulu).
-
-**SoundLoaders (Turnstile):**
-1. Buka `https://soundloaders.app/` di Chrome/Edge. **JANGAN klik Download
-   di situs itu** — itu memakai tokennya duluan sebelum app sempat pakai.
-2. Tekan `F12` → tab **Console**.
-3. Tempel **snippet Turnstile** (ada di app: sidebar → *Cara ambil token*) →
-   `Enter`. Snippet me-reset widget untuk menerbitkan token fresh, lalu
-   menunggu (maks 60 dtk). Kalau situs melempar ke halaman anti-bot, kembali
-   ke `soundloaders.app` lalu ulangi.
-4. **Selesaikan centang Turnstile** yang muncul. Token fresh otomatis
-   **tersalin ke clipboard** & tercetak dengan label `SOUNDLOADERS_TOKEN`.
-5. Tempel token itu ke kolom **Token CAPTCHA** di sidebar app ini → klik
-   **Proses / Tampilkan Daftar Lagu** dalam ±5 menit. Jangan klik Download
-   di situs sesudah copy.
-
-**SpotiDown (reCAPTCHA v3):**
-1. Buka `https://spotidown.app/` di browser.
-2. Tempel URL Spotify Anda di situs itu, klik **Download** sekali (biarkan
-   prosesnya) — ini mengaktifkan reCAPTCHA v3 + cookie sesi.
-3. Tekan `F12` → tab **Console** → jalankan **snippet reCAPTCHA** → `Enter`.
-4. Token tercopy ke clipboard & tercetak dengan label `SPOTIDOWN_TOKEN`.
-5. Tempel ke kolom **Token CAPTCHA** di sidebar → klik **Proses**.
-
-Catatan penting:
-- Token **single-use & kedaluwarsa ±5 menit**, terikat sesi browser Anda —
-  langsung gunakan sebelum kedaluwarsa, dan jangan kirim token yang sama
-  ke situsnya dulu.
-- Kalau token kosong/salah/kedaluwarsa, app **tidak crash**: muncul pesan merah
-  "CAPTCHA / token diperlukan" plus detail error dari service (termasuk
-  `token_len` yang terkirim, untuk memastikan token kepotong atau tidak).
-- Tidak ada jaminan layanan menerima request server-side walau token valid
-  (mereka bisa cek IP/cookie tambahan).
-
-#### Kalau token mati di tengah jalan (refresh/retry)
-
-Satu token untuk menampilkan daftar lagu bisa expired saat lagu ke-N
-di-download (halaman/aksi baru = token baru). App menangani ini tanpa
-mengulang dari awal:
-
-1. Tiap lagu yang gagal dicatat jenisnya: `[token]` (captcha expired/invalid),
-   `[fetch]` (MP3 ketemu tapi file gagal diunduh), `[service]` (lainnya).
-2. Sidebar menampilkan **umur token** ("fresh" vs "kemungkinan KEDALUWARSA
-   (>4 mnt)") supaya jelas kapan harus ambil baru.
-3. Selama hasil batch masih ada yang gagal, muncul panel **"Retry N gagal
-   dengan token baru"**: solve CAPTCHA lagi → tempel token fresh di sidebar
-   → klik retry. Hanya lagu gagal yang di-request ulang (sesi/cookie yang
-   sama dipakai ulang supaya `track_token` tetap valid), dan MP3 yang pulih
-   **digabung ke ZIP yang sudah ada** (`BatchOrchestrator.retry_failed`).
+Konsekuensi nyata: playwright (112 MB) tidak perlu diinstal lagi, pip install
+jauh lebih cepat, dan ~1.800 baris kode mati hilang.
 
 ### Risiko / kapan app ini berhenti bekerja
 
-- Service **down / rate-limit / memblokir IP** → request gagal; app hanya bisa
-  menampilkan error. Tidak ada fallback lokal karena kita memang tidak punya
-  scraper sendiri.
-- Markup hasil `/action` **berubah** → parser `providers/parsing.py` menyerah
-  pada data yang tidak dikenal (row tanpa `data`/`track_token` dibuang), tidak
-  crash, tapi daftar bisa kosong.
-- Captcha mengeras (Turnstile interaktif, dsb.) → token dari browser mungkin
-  tidak cukup; error `CAPTCHA` muncul dan tidak bisa diatasi dari sisi server.
-- Endpoint baru ditutup / butuh auth → app harus diperbarui mengikuti `script.js`
-  service tsb.
-
-SpotiDown juga punya endpoint ZIP sendiri (`/action/bulktrack`,
-`/action/create_zip`) yang **dibatasi 5 lagu untuk free** — app ini sengaja
-**tidak** memakainya; ZIP dibuat lokal di `core/orchestrator.py`.
+- **YouTube rate-limit atau memblokir IP datacenter** → request gagal; app hanya
+  bisa menampilkan error. Jalankan di koneksi rumah, atau pakai proxy
+  residential kalau harus di-deploy.
+- **Markup halaman embed Spotify berubah** → `providers/spotify_embed.py`
+  menyerah pada data yang tidak dikenal (lagu tanpa `track_token` dibuang),
+  tidak crash, tapi daftar bisa kosong.
+- **Cara YouTube mengambil audio berubah** → `yt-dlp` perlu di-update
+  (`pip install -U yt-dlp`).
+- **Video dihapus / diblokir di wilayah tertentu** → satu lagu gagal, sisanya
+  tetap diproses karena batch tidak berhenti saat ada kegagalan.
 
 </details>
 
@@ -566,21 +487,22 @@ Tampil juga di UI (expander "Disclaimer & Catatan Legal"):
 ## Test
 
 ```powershell
-.venv\Scripts\python.exe tests\smoke.py              # 25 cek, offline
-.venv\Scripts\python.exe tests\test_youtube.py       # 27 cek, offline
-.venv\Scripts\python.exe tests\test_spotify_embed.py # 35 cek, offline
+.venv\Scripts\python.exe tests\smoke.py              # 15 cek, offline
+.venv\Scripts\python.exe tests\test_youtube.py       # 71 cek, offline
+.venv\Scripts\python.exe tests\test_spotify_embed.py # 36 cek, offline
 .venv\Scripts\python.exe tests\test_spclient.py      # 115 cek, offline
 .venv\Scripts\python.exe tests\test_tags.py          # tag ID3 + cover, offline
-.venv\Scripts\python.exe tests\test_cover_size.py    # resolusi cover, offline
-.venv\Scripts\python.exe tests\test_spotidown_co.py  # 67 cek, offline
-.venv\Scripts\python.exe tests\test_theme.py         # tema + CSS, offline
+.venv\Scripts\python.exe tests\test_cover_size.py    # 22 cek, offline
+.venv\Scripts\python.exe tests\test_theme.py         # 51 cek, offline
 .venv\Scripts\python.exe tests\test_fetch_bytes.py   # 12 cek, offline
 .venv\Scripts\python.exe tests\test_oauth.py         # 32 cek, offline
+.venv\Scripts\python.exe tests\test_covers.py        # 34 cek, offline
 .venv\Scripts\python.exe tests\test_app.py           # end-to-end UI (Mock)
 ```
 
-Semuanya offline — tidak perlu jaringan, Chrome, atau credential. Payload
-Spotify/YouTube yang tertangkap disimpan di `tests/fixtures/`.
+Total **418 cek**. Semuanya offline — tidak perlu jaringan, Chrome, atau
+credential. Payload Spotify/YouTube yang tertangkap disimpan di
+`tests/fixtures/`.
 
 Untuk cek manual provider YouTube (butuh internet + ffmpeg):
 

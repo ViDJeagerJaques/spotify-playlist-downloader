@@ -458,8 +458,7 @@ class SpotifyMeta:
                 "Tidak bisa membaca playlist itu. Halaman embed publik Spotify "
                 "tidak tersedia (playlist private atau blokir wilayah), dan "
                 "credential Web API belum diisi. Isi SPOTIFY_CLIENT_ID / "
-                "SPOTIFY_CLIENT_SECRET di .env, atau pakai backend SpotiDown.co "
-                "di sidebar.",
+                "SPOTIFY_CLIENT_SECRET di .env.",
                 details=f"embed failed and no API credentials configured (prefer={self._prefer})",
             )
 

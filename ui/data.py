@@ -4,16 +4,10 @@
 produces it from a real ``ResolveResult`` returned by a provider. Both modules
 expose the same helper names, so the pages can be pointed at either one.
 
-BATCH_LIMIT
------------
-This is the REAL cap, not a made-up number: spotidown.co's free tier returns at
-most 100 tracks per playlist. Evidence from a live response:
-``totalCount: 213`` with exactly 100 objects in ``tracks``.
-
-We do NOT try to work around that limit (no pagination tricks, no extra params).
-When a playlist is longer, ``playlist_view()`` surfaces ``provider_hint`` and the
-UI tells the user the remaining tracks need a premium account and suggests
-splitting the playlist.
+Note: the 100-track cap that used to be documented here belonged to a
+third-party free tier which no longer exists. The Spotify embed page and the
+anonymous client both return the whole playlist, so there is no limit here any
+more — only the user's own choice of how many to download at a time.
 """
 from __future__ import annotations
 
@@ -33,7 +27,7 @@ PART_SIZE = 30
 # name. Same value; prefer PART_SIZE in new code.
 BATCH_LIMIT = PART_SIZE
 
-DEFAULT_PROVIDER = ProviderId.SPOTIDOWN_CO.value
+DEFAULT_PROVIDER = ProviderId.YOUTUBE.value
 
 
 def format_duration(ms: int) -> str:
@@ -67,18 +61,14 @@ def load_playlist(spotify_url: str, provider_id: str = DEFAULT_PROVIDER,
                   timeout: int = 90) -> ResolveResult:
     """Fetch a real playlist through the selected provider.
 
-    Blocks for up to ``timeout`` seconds: the provider drives a real Chrome
-    window so the site can solve its own Cloudflare challenge. Callers must show
-    a spinner and warn the user not to close that window.
+    ``timeout`` is still accepted because YouTube's client has a request timeout
+    of its own; the value only widens it for providers that need a long budget.
     """
     url = (spotify_url or "").strip()
     if not url:
         raise ValueError("Tempel URL playlist Spotify dulu.")
 
     provider = make_provider(provider_id)
-    if provider_id == ProviderId.SPOTIDOWN_CO.value:
-        # The SpotiDown.co client is the only one with a meaningful wait budget.
-        provider._timeout = timeout
     return provider.load_tracks(url)
 
 
@@ -190,9 +180,17 @@ def to_json_obj(view: dict) -> dict:
 
 
 def download_headers() -> dict:
-    """MP3 endpoint headers (Origin/Referer) taken from the active provider."""
-    from providers.spotidown_co import DOWNLOAD_HEADERS
-    return dict(DOWNLOAD_HEADERS)
+    """Headers for fetching artwork from the Spotify CDN.
+
+    Only the ``User-Agent`` is actually read by the caller (cover downloads hit
+    ``i.scdn.co``). This used to return SpotiDown's Origin/Referer pair, which
+    only made sense for *their* CDN and were meaningless here.
+    """
+    return {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/126.0 Safari/537.36"),
+    }
 
 
 def cover_hint(count: int) -> Optional[str]:

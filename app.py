@@ -1,13 +1,12 @@
-﻿"""Spotify Playlist Downloader â€” Streamlit UI (personal use).
+﻿"""Spotify Playlist Downloader — Streamlit UI (personal use).
 
 Architecture
 ------------
 app.py          -> Streamlit UI only (state, inputs, rendering)
 core/           -> i18n strings + batch orchestrator (per-track resolve + local ZIP)
-providers/      -> thin HTTP clients for the third-party backends; this is the
-                   ONLY place third-party endpoints are touched. See the
-                   DEPENDENCY NOTE docstrings in providers/soundloaders.py and
-                   providers/spotidown.py for the exact risks.
+providers/      -> YouTube audio (yt-dlp) + Spotify metadata clients. The audio
+                   comes straight from YouTube, so no third-party download
+                   service and no CAPTCHA are involved.
 
 No premium gate, upgrade prompt or paywall exists anywhere in this app.
 """
@@ -48,81 +47,17 @@ from ui import dummy as ui_dummy
 from ui import theme as ui_theme
 
 # ---------------------------------------------------------------- constants
-# Default is YouTube: no browser, no CAPTCHA, runs on a VPS. The metadata comes
-# from Spotify's public embed page (no auth at all), so no .env is needed for
-# public playlists.
+# YouTube is the only real backend: no browser, no CAPTCHA, no third-party
+# service. Metadata comes from Spotify's public embed page plus the anonymous
+# client (no auth), so no .env is needed for public playlists.
+# The token-based services (SoundLoaders / SpotiDown) were removed because they
+# stopped working — offering a choice that silently does nothing is worse than
+# not offering it.
 PROVIDER_CHOICES = {
     ProviderId.YOUTUBE.value: "YouTube via yt-dlp (default — tanpa browser)",
-    ProviderId.SPOTIDOWN_CO.value: "SpotiDown.co (legacy — butuh Chrome terbuka)",
-    ProviderId.SOUNDLOADERS.value: "SoundLoaders (legacy — butuh token Cloudflare)",
-    ProviderId.SPOTIDOWN.value: "SpotiDown.app (legacy — butuh token reCAPTCHA)",
     ProviderId.MOCK.value: "Demo (Mock, offline)",
 }
 DEMO_URL = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
-
-TURNSTILE_SNIPPET = """// ===== SoundLoaders: ambil token Turnstile FRESH (single-use!) =====
-// Token Turnstile hanya bisa dipakai SATU KALI (aturan Cloudflare): kalau Anda
-// klik Download di situsnya dulu, token itu sudah dipakai situs & hangus
-// (error timeout-or-duplicate). Jadi snippet ini me-RESET widget untuk
-// menerbitkan token baru yang belum dipakai siapa pun.
-// Langkah:
-// 1) Buka https://soundloaders.app/ (JANGAN klik Download di situs itu).
-// 2) F12 -> Console, paste snippet ini -> Enter.
-// 3) Selesaikan centang Turnstile yang muncul. Snippet menunggu (maks 60 dtk).
-// 4) Token fresh otomatis dicopy ke clipboard -> tempel di app -> klik Proses.
-// 5) JANGAN klik Download di situs sesudah copy (token langsung hangus).
-(async () => {
-  const grab = () => document.querySelector("input[name='cf-turnstile-response']")?.value || '';
-  const old = grab();
-  try {
-    turnstile.reset();
-    console.log('Widget di-reset. Selesaikan centang Turnstile yang muncul, snippet menunggu...');
-  } catch (e) { console.log('Reset butuh interaksi manual, lanjut memantau token...'); }
-
-  const token = await new Promise((resolve) => {
-    const poll = setInterval(() => {
-      const v = grab();
-      if (v && v !== old && v.includes('.')) { clearInterval(poll); clearTimeout(timer); resolve(v); }
-    }, 400);
-    const timer = setTimeout(() => { clearInterval(poll); resolve(grab() && grab() !== old ? grab() : ''); }, 60000);
-  });
-
-  if (!token) {
-    console.error('Belum ada token fresh. Selesaikan centang widget dulu lalu jalankan ulang snippet.');
-    return;
-  }
-  if (!token.includes('.')) {
-    console.warn('Token tidak seperti JWT Turnstile. Selesaikan centang dulu lalu jalankan ulang.');
-    return;
-  }
-  try { await navigator.clipboard.writeText(token); console.log('(token disalin ke clipboard)'); }
-  catch (e) { console.log('(gagal copy otomatis, salin manual dari bawah)'); }
-  console.log('%cSOUNDLOADERS_TOKEN', 'color:green;font-weight:bold;font-size:1.2em');
-  console.log(token);
-})();"""
-
-RECAPTCHA_SNIPPET = """// ===== SpotiDown: ambil token reCAPTCHA v3 (JANGAN auto-submit) =====
-// Jalankan di Console browser pada halaman https://spotidown.app/
-// Sebelum menjalankan snippet: submit URL Anda 1x lewat form situs agar
-// situs menjalankan reCAPTCHA v3 & mengaitkan cookie sesi Anda.
-// Snippet ini hanya meminta token baru lalu menyalinnya ke clipboard.
-(async () => {
-  const wait = (ms) => new Promise(r => setTimeout(r, ms));
-  for (let i = 0; i < 20 && !window.grecaptcha; i++) await wait(250);
-  if (!window.grecaptcha) { console.error('grecaptcha tidak tersedia. Muat ulang halaman lalu coba lagi.'); return; }
-  try {
-    const token = await window.grecaptcha.execute(
-      '6LcXkaUqAAAAAGvO0z9Mg54lpG22HE4gkl3XYFTK', { action: 'submit' });
-    if (!token) { console.error('Token kosong. Ulangi submit form situs sekali, lalu jalankan snippet lagi.'); return; }
-    try { await navigator.clipboard.writeText(token); console.log('(token disalin ke clipboard)'); }
-    catch (e) { console.log('(gagal copy otomatis, salin manual dari bawah)'); }
-    console.log('%cSPOTIDOWN_TOKEN', 'color:blue;font-weight:bold;font-size:1.2em');
-    console.log(token);
-  } catch (e) {
-    console.error('reCAPTCHA execute gagal:', e);
-  }
-})();"""
-
 
 # -------------------------------------------------------------------- state
 def init_state() -> None:
@@ -137,7 +72,7 @@ def init_state() -> None:
         "download_mode": DownloadMode.STREAM_LOCAL.value,
         "captcha_token": "",
         "provider_obj": None,  # provider client reused so listing + resolve share one session/cookie
-        # ---- TAHAP UI: navigasi + playlist asli (spotiDown.co) ----
+        # ---- TAHAP UI: navigasi + halaman playlist ----
         "page": "home",              # home | playlist | songs | covers | backup
         "playlist_url": "",          # link Spotify dari Home, dipakai semua halaman
         "playlist_view": None,       # dict hasil ui_data.playlist_view()
@@ -231,28 +166,8 @@ def sidebar() -> None:
             st.session_state.per_track = {}
             st.session_state.batch = None
 
-        token = st.text_input(
-            L("sidebar.captcha"),
-            value=st.session_state.captcha_token,
-            placeholder="paste token here...",
-            help=L("sidebar.captcha_help"),
-        )
-        st.session_state.captcha_token = token
-        _tok = (token or "").strip()
-        if _tok != st.session_state.get("_token_seen"):
-            # Token content changed -> restart the freshness clock.
-            st.session_state["_token_seen"] = _tok
-            st.session_state["token_updated_at"] = time.time()
-        if _tok:
-            _age = int(time.time() - st.session_state.get("token_updated_at", time.time()))
-            if _age > 240:  # Turnstile/reCAPTCHA tokens die after ~300s
-                st.caption(L("sidebar.token_stale", n=len(_tok), age=_age))
-            else:
-                st.caption(L("sidebar.token_ok", n=len(_tok), age=_age))
-        else:
-            st.caption(L("sidebar.token_empty"))
-        with st.expander(L("sidebar.btn_show_token_help")):
-            _show_token_help(st.session_state.lang)
+        # No CAPTCHA field here any more. It existed for the token-based
+        # third-party services; YouTube needs no token at all.
 
         mode = st.radio(
             L("sidebar.zip_mode"),
@@ -278,23 +193,6 @@ def sidebar() -> None:
 # legacy token-based backends used, and its translations are still referenced.
 
 
-def _show_token_help(lang: str) -> None:
-    L = lambda k, **fmt: i18n.tr(lang, k, **fmt)  # noqa: E731
-    st.markdown(f"**{L('help_token.title')}**")
-    if st.session_state.backend == ProviderId.SOUNDLOADERS.value:
-        for s in L("help_token.sl_steps"):
-            st.markdown(f"- {s}")
-        st.code(TURNSTILE_SNIPPET, language="javascript")
-    elif st.session_state.backend == ProviderId.SPOTIDOWN.value:
-        for s in L("help_token.sd_steps"):
-            st.markdown(f"- {s}")
-        st.code(RECAPTCHA_SNIPPET, language="javascript")
-    else:
-        st.caption(L("help_token.mock_note"))
-    if st.session_state.backend in (ProviderId.SOUNDLOADERS.value, ProviderId.SPOTIDOWN.value):
-        st.markdown(f"**{L('help_token.note_title')}:** {L('help_token.note_body')}")
-
-
 # ------------------------------------------------- TAHAP UI: navigasi
 PAGES = {
     "home": "Home",
@@ -306,11 +204,10 @@ PAGES = {
 
 
 def sidebar_nav() -> None:
-    """Sidebar: navigasi halaman + pemilih backend.
+    """Sidebar: navigasi halaman + pemilih backend + panel cache.
 
-    Backend asli (SoundLoaders / SpotiDown.app) TIDAK dihapus — semuanya masih
-    bisa dipilih sebagai cadangan. SpotiDown.co adalah default karena dua
-    provider lama butuh token CAPTCHA yang terikat session browser.
+    YouTube is the only real backend. It needs no browser and no CAPTCHA, which
+    is also why the token field that used to live here is gone.
     """
     with st.sidebar:
         st.header("Navigasi")
@@ -363,14 +260,6 @@ def sidebar_nav() -> None:
                     "naikkan jumlah worker.\n"
                     "- Personal use saja."
                 )
-        elif backend == ProviderId.SPOTIDOWN_CO.value:
-            st.warning("Backend legacy. Butuh **Chrome terpasang** dan jendela "
-                       "Chrome akan terbuka di layar — jangan ditutup/minimize "
-                       "saat proses berjalan.", icon="⚠️")
-        elif backend in (ProviderId.SOUNDLOADERS.value, ProviderId.SPOTIDOWN.value):
-            st.warning("Backend legacy: butuh token CAPTCHA manual yang "
-                       "diambil dari browser Anda sendiri (lihat README).",
-                       icon="⚠️")
 
         st.divider()
         if st.session_state.get("playlist_url"):
@@ -497,12 +386,10 @@ def _load_playlist(url: str) -> None:
         return
 
     provider = _get_provider()
-    if backend == ProviderId.SPOTIDOWN_CO.value:
-        note = "Membuka Chrome. jangan tutup/minimize jendela Chrome yang muncul."
-    elif backend == ProviderId.YOUTUBE.value:
+    if backend == ProviderId.YOUTUBE.value:
         note = "Membaca daftar lagu dari halaman publik Spotify."
     else:
-        note = "Menghubungi layanan."
+        note = "Mode demo — tanpa jaringan."
 
     # Reading a large playlist means one /embed/track + one oEmbed request per
     # song (213 songs took ~77 s on a cold cache), so show real progress rather
@@ -540,8 +427,8 @@ def _load_playlist(url: str) -> None:
     owner, total_ms = _embed_header_info(provider)
     view = ui_data.playlist_view(result)
     view["owner"] = owner
-    # The playlist's own cover. Falls back to the first track's album art when a
-    # legacy provider (SpotiDown.co / SoundLoaders) doesn't supply one.
+    # The playlist's own cover. Falls back to the first track's album art when
+    # the provider has no playlist-level artwork (the mock/demo one).
     view["playlist_cover"] = getattr(provider, "last_playlist_cover", "") or ""
     view["total_duration_ms"] = view.get("total_duration_ms") or total_ms
     st.session_state.playlist_view = view
@@ -711,9 +598,9 @@ def _render_ui_batch_result() -> None:
             st.info(f"Retry selesai: {summary['recovered']} pulih, "
                     f"{summary['still_failed']} masih gagal.")
             if summary["still_failed"]:
-                st.caption("Penyebab paling umum: link MP3 dari spotidown.co "
-                           "kedaluwarsa (butuh ±10 menit). Muat ulang playlist di "
-                           "Home untuk dapat link baru, lalu ulangi.")
+                st.caption("Penyebab paling umum: YouTube sempat memblokir "
+                           "request (bot check) atau video dihapus. Coba lagi "
+                           "nanti, atau ganti backend ke YouTube.")
             st.rerun()
 
 
@@ -964,9 +851,7 @@ def page_home() -> None:
 
     view = st.session_state.get("playlist_view")
     if not view:
-        st.info("Klik **Load Playlist** untuk memuat daftar lagu. "
-                "SpotiDown.co membuka jendela Chrome untuk solving CAPTCHA-nya "
-                "sendiri — biarkan jendela itu terbuka.")
+        st.info("Klik **Load Playlist** untuk memuat daftar lagu.")
         return
 
     tracks = view["tracks"]
@@ -1672,11 +1557,9 @@ def _fetch_bytes(mp3_url: str) -> bytes:
     * ``mock://...``            — the offline Demo provider (placeholder bytes).
     * **a local file path**     — YouTube/yt-dlp: the search + download + ffmpeg
       work already happened inside ``resolve_track``, so the "URL" is really a
-      finished file on disk (``C:\\...\\spotify_yt_cache\\x.mp3``). Passing such
-      a path to ``requests.get`` raises ``InvalidSchema``, which is why the
-      Download Lagu page needs this branch.
-    * an ``http(s)://`` URL     — the legacy providers (SpotiDown.co,
-      SoundLoaders, SpotiDown.app) still return a real URL to fetch.
+      finished file on disk (``.cache/<token>.mp3``). Passing such a path to
+      ``requests.get`` raises ``InvalidSchema``, which is why the Download Lagu
+      page needs this branch.
     """
     if mp3_url.startswith("mock://"):
         return _mock_mp3_bytes()

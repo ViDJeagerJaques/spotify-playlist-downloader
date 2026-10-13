@@ -1,12 +1,10 @@
-"""YouTube-backed provider — the DEPLOYABLE path.
+"""YouTube-backed provider — the one and only download path.
 
 WHY THIS EXISTS
 ---------------
-The SpotiDown.co provider (``providers/spotidown_co.py``) needs a real, visible
-Chrome window on the user's own desktop. That makes it useless for any hosted
-deployment and awkward for non-technical users.
-
-This provider takes the other route:
+Audio has to come from somewhere, and YouTube is the only source that needs no
+account, no API key and no browser window — so the app runs unchanged on a
+laptop or a VPS. It works like this:
 
     Spotify Web API  ->  song list (title, artist, duration)
     yt-dlp           ->  find + download the matching audio from YouTube
