@@ -395,13 +395,24 @@ def test_table_css_prevents_wrapping():
     assert "min-width: 0" in body, ".nx9-tbl-body harus min-width: 0"
 
     # Streamlit inserts 16px between columns; the table must not inherit it.
-    assert ".stHorizontalBlock {" in css
+    # Scoped with :has() — as a global rule it also flattened the cover gallery
+    # and the button rows on every other page.
+    assert ".stHorizontalBlock:has(.nx9-tbl-row) {" in css
     assert "gap: 0 !important" in css
+    assert "\n.stHorizontalBlock {\n" not in css, \
+        "gap:0 global akan merusak galeri & baris tombol halaman lain"
 
     # The actions column is nudged down so the button shares a baseline with the
-    # cover. If this is dropped the button floats above the artwork again.
-    assert "margin-top: 13px" in css, \
+    # cover, and pinned to a fixed width. Both are easy to drop: without the
+    # margin the button floats above the artwork, and without min-width
+    # Streamlit's narrow-screen `calc(100% - 24px)` swallows the row (measured:
+    # actions 395px inside a 419px block, title track collapsed to 0).
+    assert "margin-top: calc(4px + clamp(0.5rem, 1vw, 0.75rem))" in css, \
         "penyelarasan vertikal tombol Unduh hilang"
+    assert "min-width: 6rem !important" in css, \
+        "kolom aksi harus dikunci lebarnya"
+    assert "min-width: 0 !important" in css, \
+        "kolom grid harus boleh menyusut"
 
     # A missing cover must degrade to a grey tile, never a collapsed box.
     art = css.split(".nx9-tbl-art {", 1)[1].split("}", 1)[0]
@@ -423,6 +434,71 @@ def test_table_css_prevents_wrapping():
     print("OK: CSS tabel — grid, ellipsis, no-gap, baseline tombol, cover fallback")
 
 
+def test_layout_is_fluid_not_fixed_px():
+    """The table and page width must scale with the viewport.
+
+    Regression guard for "looks fine on my monitor only": every table track and
+    the page container have to be clamp()/vw based, and there must be enough
+    breakpoints to shed columns before the title gets crushed.
+    """
+    from ui import theme
+
+    css = theme.NX9_CSS
+    # Comments inside the grid template document the px targets (e.g.
+    # "28 -> 32px"); strip them before scanning so they are not mistaken for
+    # actual fixed sizing.
+    bare = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    row = bare.split(".nx9-tbl-row {", 1)[1].split("}", 1)[0]
+
+    # No bare px inside the grid template — that is the whole point. Scope the
+    # scan to the declaration itself; border-radius/border legitimately use px.
+    template = row.split("grid-template-columns:", 1)[1].split(";", 1)[0]
+    for px in re.findall(r"(\d+)px", template):
+        raise AssertionError(
+            f"grid template masih pakai {px}px fixed; harus clamp()/rem")
+    assert template.count("clamp(") >= 4, \
+        "sebagian besar track harus clamp()"
+    assert "minmax(0, 1fr)" in template, "kolom judul harus tetap fluid"
+
+    # Spacing follows a 4/8px rhythm, not arbitrary numbers.
+    assert "gap: clamp(" in row, "gap harus clamp()"
+    assert "padding: clamp(" in row, "padding harus clamp()"
+    for odd in ("9px", "10px", "13px", "14px"):
+        assert odd not in row, f"nilai ganjil {odd} masih ada di baris tabel"
+
+    # Page container must be fluid with an upper bound, not Streamlit's 736px.
+    assert "max-width: min(1600px, 94vw)" in bare, \
+        "lebar halaman harus fluid dengan batas atas"
+    assert "736px" not in bare, "batas 736px bawaan masih ada di override"
+
+    # Enough breakpoints: wide cap, tablet (drop album), phone (drop number),
+    # plus a phone breakpoint for the playlist header card.
+    for bp in ("min-width: 1700px", "max-width: 1100px", "max-width: 640px"):
+        assert f"@media ({bp})" in css, f"breakpoint {bp} hilang"
+    assert css.count("@media") >= 4, "media query terlalu sedikit"
+
+    # Every breakpoint that hides a cell must also drop its grid track,
+    # otherwise the hidden cell leaves a hole in the row.
+    for mq in re.findall(r"@media[^{]*\{(.*?)\n\}\s*$", css, re.S | re.M):
+        if ".nx9-tbl-album" in mq and "display: none" in mq:
+            assert "grid-template-columns" in mq, \
+                "album disembunyikan tapi track grid tidak dikurangi"
+    phone = css.split("max-width: 640px", 1)[1]
+    assert ".nx9-tbl-num" in phone and "display: none" in phone, \
+        "nomor harus disembunyikan di layar sempit"
+    assert "grid-template-columns" in phone, \
+        "nomor disembunyikan tapi track grid tidak dikurangi"
+
+    # Caption placeholders must keep the same classes as the data cells so they
+    # vanish in step; otherwise the headings drift off the columns.
+    assert ".nx9-tbl-spacer" in css, "sel kosong header kolom harus ada"
+    spacer_art = css.split(".nx9-tbl-spacer.nx9-tbl-art {", 1)[1].split("}", 1)[0]
+    assert "height: 0" in spacer_art, \
+        "placeholder harus berukuran 0 tinggi"
+
+    print("OK: layout fluid — clamp tracks, 4/8px rhythm, 3 breakpoints")
+
+
 if __name__ == "__main__":
     main()
     test_header_uses_the_playlist_cover()
@@ -430,3 +506,4 @@ if __name__ == "__main__":
     test_playlist_cover_prefix_is_not_upgraded()
     test_songs_page_is_a_column_table()
     test_table_css_prevents_wrapping()
+    test_layout_is_fluid_not_fixed_px()

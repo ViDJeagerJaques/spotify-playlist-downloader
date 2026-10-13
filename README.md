@@ -247,28 +247,58 @@ Kelas untuk **tabel Download Lagu** (`ui/theme.py`): `nx9-tbl-row`, `nx9-tbl-dat
 `nx9-tbl-sub`, `nx9-tbl-dur`, `nx9-tbl-head`.
 
 Setiap baris adalah **satu blok HTML dengan CSS grid**
-(`28px 40px minmax(0,1fr) minmax(0,140px) 44px`), bukan `st.columns()`. Alasannya
-`stHorizontalBlock` punya gap 16px bawaan yang tidak bisa dinetralkan dari dalam
-cell — dengan 7 kolom itu jadi 96px ruang mati per baris, dan kolom sempit di
-sekitar checkbox/tombol tergencet sampai cover meluap keluar kotaknya. Grid
-memberi kendali piksel penuh dan menjamin semua baris memakai template yang sama.
+(`clamp(1.75rem,2vw,2rem) clamp(2.75rem,3vw,3rem) minmax(0,1fr)
+minmax(0,clamp(8rem,14vw,16rem)) clamp(2.5rem,3vw,2.75rem)`), bukan
+`st.columns()`. Alasannya `stHorizontalBlock` punya gap 16px bawaan yang tidak
+bisa dinetralkan dari dalam cell - dengan 7 kolom itu jadi 96px ruang mati per
+baris, dan kolom sempit di sekitar checkbox/tombol tergencet sampai cover meluap
+keluar kotaknya.
 
 Checkbox + tombol "Unduh" tidak bisa masuk ke `st.markdown`, jadi tiap baris
 dipecah jadi dua kolom Streamlit saja (`[grid HTML] [aksi]`).
 
-Tiga aturan yang wajib ada dan sering hilang:
+Semua ukuran fluid dan mengikuti ritme 4/8px. `clamp(min, ideal, max)` =
+"tidak lebih kecil dari min, tidak lebih besar dari max, idealnya ikut viewport",
+dan itulah yang bikin layout-nya universal (bukan cuma enak di satu ukuran layar).
+
+Lima aturan yang wajib ada dan mudah hilang:
 
 - `minmax(0, 1fr)` di kolom judul + `min-width: 0` di `.nx9-tbl-body`. Tanpa itu
   grid item menolak menyusut dan `text-overflow: ellipsis` tidak pernah jalan.
-- `margin-top: 13px` di kolom aksi, supaya tombol dan cover berbagi baseline.
-- Cover **40px**, bukan 48px, supaya tinggi baris grid (60px) melebihi slot yang
-  dipesan Streamlit untuk widget (54px). Kalau grid lebih tinggi, isinya meluap
-  dan tombol terdorong ke atas.
+- `flex: 1 1 0` + `min-width: 0` di kolom grid. Streamlit menghitung basis kolom
+  pertama sebagai `calc(87.72% - 16px)`; kalau gap dihapus tapi basisnya tidak,
+  flex-wrap aktif dan tombol jatuh ke baris bawah.
+- `flex: 0 0 6rem` + `min-width: 6rem` di kolom aksi. Di layar sempit Streamlit
+  menyetel `min-width: calc(100% - 24px)` yang menelan seluruh baris.
+- `margin-top: calc(4px + clamp(0.5rem,1vw,0.75rem))` di kolom aksi, supaya
+  tombol dan cover berbagi baseline. Harus clamp yang sama dengan padding baris.
+- Tinggi baris harus **lebih besar** dari slot yang dipesan Streamlit untuk
+  widget. Kalau grid lebih pendek, isinya meluap dan tombol terdorong ke atas.
 
-Kolom album otomatis hilang di bawah 900px (`@media`) supaya judul tidak
-tergencet. `tests/test_app.py` punya regression guard untuk `:has()` bersarang —
-selector itu jadi invalid kalau `:has()` muncul di dalam `:has()` lain, dan
-browser **diam-diam** membuang seluruh rule-nya tanpa error.
+Tiga breakpoint: `min-width: 1700px` (batas lebar baca), `max-width: 1100px`
+(hilangkan kolom album), `max-width: 640px` (hilangkan nomor, cover lebih besar,
+header jadi kartu bertumpuk). Setiap breakpoint yang menyembunyikan sel **wajib**
+sekalian mengurangi jumlah track grid, kalau tidak akan ada lubang di baris.
+`tests/test_app.py` mengunci semua itu, termasuk regression guard untuk `:has()`
+bersarang - selector itu jadi invalid kalau `:has()` muncul di dalam `:has()` lain,
+dan browser **diam-diam** membuang seluruh rule-nya tanpa error.
+
+### Lebar halaman
+
+`app.py` sudah memanggil `st.set_page_config(layout="wide")`. Di Streamlit 1.63
+itu berarti `max-width` block container di-set `initial` (= unbounded), **bukan**
+736px - jadi tidak ada batas 736px yang perlu dibongkar. Masalahnya justru
+sebaliknya: tanpa batas atas, monitor 1920px meregangkan tabel jadi 1920px dan
+kolom album melayang ~1400px dari judul. Karena itu `ui/theme.py` hanya menambah
+**batas atas**:
+
+```css
+.block-container { max-width: min(1600px, 94vw) !important; }
+```
+
+Catatan: `st.columns()` tidak punya mode responsif di Python
+(`SpecType = int | Sequence[int | float]`), jadi jumlah kolom galeri cover tetap
+4 dan tidak bisa ikut viewport.
 
 > **Yang tidak ada (disepakati):** desain NX9 asli punya background WebGL /
 > Three.js dengan partikel dan animasi. **Streamlit tidak bisa merender itu**

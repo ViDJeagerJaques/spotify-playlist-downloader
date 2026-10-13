@@ -66,17 +66,14 @@ SQUARE_ART_CSS = f"""
     display: block;
 }}
 /* Sized variants used by app.py. The box is always square; only the width
-   differs, so a 48px list thumbnail and a 200px header stay 1:1. */
+   differs, so a list thumbnail and a large header cover stay 1:1. Widths scale
+   with the viewport so they do not look tiny on a large monitor or crowd the
+   text on a small one. */
 .nx9-art-sm {{
-    width: 48px;
-}}
-/* The Download Lagu table uses a slightly smaller thumbnail. */
-.nx9-art-tbl {{
-    width: 40px;
-    height: 40px;
+    width: clamp(2.75rem, 3vw, 3rem);
 }}
 .nx9-art-lg {{
-    width: 200px;
+    width: clamp(9rem, 14vw, 12.5rem);
     max-width: 100%;
 }}
 </style>
@@ -92,6 +89,31 @@ html, body, [class*="css"] {{
 }}
 .stApp {{
     background: {BACKGROUND};
+}}
+
+/* ---- page width ------------------------------------------------------
+   app.py already calls st.set_page_config(layout="wide"), and Streamlit 1.63
+   implements that by setting the main block container's max-width to `initial`
+   (verified: getComputedStyle gives "none" and the box measures the full
+   viewport). So there is no 736px cap left to undo — the real problem is the
+   opposite one: with no ceiling at all, a 1920px monitor stretches the table to
+   1920px, the album column drifts ~1400px away from the title, and there is a
+   lake of empty space in the middle. So we add an upper bound only.
+
+   `94vw` keeps a visible gutter on very narrow windows, and the 1600px ceiling
+   stops single rows becoming unreadable line lengths. */
+.block-container,
+[data-testid="stMainBlockContainer"] {{
+    max-width: min(1600px, 94vw) !important;
+    padding-left: clamp(1rem, 3vw, 3rem) !important;
+    padding-right: clamp(1rem, 3vw, 3rem) !important;
+}}
+/* Very wide screens: hold the ceiling even tighter so rows stay scannable. */
+@media (min-width: 1700px) {{
+    .block-container,
+    [data-testid="stMainBlockContainer"] {{
+        max-width: 1600px !important;
+    }}
 }}
 
 /* Monospace for numbers, durations, ids, code — anything tabular. */
@@ -313,23 +335,21 @@ code, pre, .nx9-mono, [data-testid="stMetricValue"] {{
      * min-width: 0 on .nx9-tbl-body — a grid item defaults to min-width:auto
        for the same reason. Both must stay together.
    --------------------------------------------------------------------------- */
-/* Row height is chosen to match what Streamlit reserves for the widgets.
-   Measured: the row block reserves the action slot's height, and any grid
-   content taller than that overflows instead of growing the block. So the
-   artwork is 40px and padding + border keep the grid at 52px, comfortably inside
-   the 54px the action slot needs — see the alignment note further down.
-
-   The earlier 48px artwork produced a 66px grid that overflowed a 50px block,
-   which is what left the Unduh button floating above the cover.
-   Widths are tuned so the title column stays wide: Streamlit's default
-   .block-container caps the app at 736px, so every fixed track here is stolen
-   from the title. */
+/* Every dimension below is clamp()'d so the table scales with the viewport
+   instead of being pinned to one screen size. Spacing follows a strict 4/8px
+   rhythm (0.25rem = 4px) — no odd 9/10/13/14px values, which is what made the
+   earlier version read as arbitrary. */
 .nx9-tbl-row {{
     display: grid;
-    grid-template-columns: 28px 40px minmax(0, 1fr) minmax(0, 140px) 44px;
+    grid-template-columns:
+        clamp(1.75rem, 2vw, 2rem)          /* nomor  28 -> 32px */
+        clamp(2.75rem, 3vw, 3rem)          /* cover  44 -> 48px */
+        minmax(0, 1fr)                     /* judul          */
+        minmax(0, clamp(8rem, 14vw, 16rem))/* album 128 -> 256px */
+        clamp(2.5rem, 3vw, 2.75rem);       /* durasi 40 -> 44px */
     align-items: center;
-    gap: 10px;
-    padding: 9px 10px;
+    gap: clamp(0.75rem, 1.5vw, 1rem);
+    padding: clamp(0.5rem, 1vw, 0.75rem) clamp(0.75rem, 1.5vw, 1.25rem);
     border-radius: {RADIUS};
     border: 1px solid transparent;
 }}
@@ -340,18 +360,18 @@ code, pre, .nx9-mono, [data-testid="stMetricValue"] {{
 .nx9-tbl-num {{
     font-family: '{FONT_MONO}', monospace;
     color: {TEXT_SECONDARY};
-    font-size: 12px;
+    font-size: 0.75rem;
     text-align: right;
 }}
 /* Stays a filled square even when the image 404s or the track has no artwork:
    background + fixed aspect-ratio means a failed <img> degrades to a grey tile,
    never to a collapsed/roboh box. */
 .nx9-tbl-art {{
-    width: 40px;
-    height: 40px;
+    width: clamp(2.75rem, 3vw, 3rem);
+    height: clamp(2.75rem, 3vw, 3rem);
     aspect-ratio: 1 / 1;
     overflow: hidden;
-    border-radius: 6px;
+    border-radius: {RADIUS};
     background: {SURFACE};
 }}
 .nx9-tbl-art img {{
@@ -363,26 +383,28 @@ code, pre, .nx9-mono, [data-testid="stMetricValue"] {{
 .nx9-tbl-body {{
     min-width: 0;
 }}
+/* Type hierarchy: title 15px / sub 13px is a real step, not the 1px gap the
+   old 14px / 13px pair had. */
 .nx9-tbl-title {{
     color: {TEXT_PRIMARY};
     font-weight: 600;
-    font-size: 14px;
-    line-height: 1.35;
+    font-size: 0.9375rem;
+    line-height: 1.4;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }}
 .nx9-tbl-sub {{
     color: {TEXT_SECONDARY};
-    font-size: 13px;
-    line-height: 1.35;
+    font-size: 0.8125rem;
+    line-height: 1.4;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }}
 .nx9-tbl-dur {{
     color: {TEXT_SECONDARY};
-    font-size: 13px;
+    font-size: 0.8125rem;
     text-align: right;
     font-family: '{FONT_MONO}', monospace;
     white-space: nowrap;
@@ -391,48 +413,126 @@ code, pre, .nx9-mono, [data-testid="stMetricValue"] {{
    caption sits at a different x than the data underneath it. */
 .nx9-tbl-head {{
     color: {TEXT_SECONDARY};
-    font-size: 11px;
-    letter-spacing: 0.04em;
+    font-size: 0.6875rem;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
     font-weight: 600;
 }}
-/* Narrow screens: drop the album column before the title is squeezed. */
-@media (max-width: 900px) {{
+/* Tablet / small laptop: drop the album column before the title gets squeezed.
+   The track count must drop with it — a hidden grid item still occupies its
+   track if the template keeps the column, which leaves a hole in the row. */
+@media (max-width: 1100px) {{
     .nx9-tbl-row {{
-        grid-template-columns: 28px 40px minmax(0, 1fr) 44px;
+        grid-template-columns: clamp(1.75rem, 2vw, 2rem)
+                             clamp(2.75rem, 3vw, 3rem)
+                             minmax(0, 1fr)
+                             clamp(2.5rem, 3vw, 2.75rem);
     }}
     .nx9-tbl-album {{
         display: none;
     }}
 }}
-
-/* Kill Streamlit's built-in inter-column gap. The table renders each row as
-   [grid HTML][actions] in its own stHorizontalBlock, and 16px of gutter between
-   just two columns pushes the grid off-centre. This is safe to do globally
-   because it only removes spacing; column widths still come from flex. */
-.stHorizontalBlock {{
-    gap: 0 !important;
+/* Phone / narrow window: the row number goes too, and the touch targets grow. */
+@media (max-width: 640px) {{
+    .nx9-tbl-row {{
+        grid-template-columns: clamp(2.75rem, 3vw, 3rem) minmax(0, 1fr)
+                             clamp(2.5rem, 3vw, 2.75rem);
+        gap: clamp(0.5rem, 1.5vw, 0.75rem);
+    }}
+    .nx9-tbl-num {{
+        display: none;
+    }}
+    .nx9-tbl-art {{
+        width: clamp(2.75rem, 3vw, 3rem);
+        height: clamp(2.75rem, 3vw, 3rem);
+    }}
 }}
-.stHorizontalBlock > [data-testid="stColumn"] {{
+
+/* Remove Streamlit's built-in inter-column gap, but ONLY on the track-table
+   rows. The table renders each row as [grid HTML][actions] in its own
+   stHorizontalBlock, and 16px of gutter between just those two columns pushes
+   the actions off to the right of the grid.
+
+   This used to be a global `.stHorizontalBlock` rule, which silently removed
+   the gutter from every other multi-column row on every page (the cover gallery
+   and the button rows ended up with tiles touching). Scoped with :has() so only
+   table rows lose it. */
+.stHorizontalBlock:has(.nx9-tbl-row) {{
+    gap: 0 !important;
+    flex-wrap: nowrap !important;
+}}
+.stHorizontalBlock:has(.nx9-tbl-row) > [data-testid="stColumn"] {{
     padding-left: 2px;
     padding-right: 2px;
 }}
+/* Give the grid column a zero flex basis so it absorbs whatever is left over.
+
+   This also fixes a wrap bug found at 480px: Streamlit computes the first
+   column's basis as `calc(87.72% - 16px)` to make room for its 16px gap. With
+   the gap removed but the basis left alone, 351px + a 96px actions column is
+   447px inside a 419px row, flex-wrap fires, and the checkbox + button drop onto
+   a second line — putting the Unduh button ~47px below the cover. A basis of 0
+   keeps the two on one line at any viewport.
+
+   Both rules below key off `:has(.nx9-tbl-row)`, not `.nx9-tbl-data`, so the
+   caption row gets the identical split. Otherwise its grid ends up 89px
+   narrower than the data rows' grid and the headings sit at different x. */
+.stHorizontalBlock:has(.nx9-tbl-row) > [data-testid="stColumn"]:first-child {{
+    flex: 1 1 0 !important;
+    /* A flex item defaults to min-width:auto, i.e. it refuses to shrink below
+       its own min-content width. The grid row contains nowrap (ellipsised)
+       text, so without this the column refuses to give ground, flex-wrap fires
+       and the actions drop onto their own line. Same reason .nx9-tbl-body needs
+       min-width: 0, one level up. */
+    min-width: 0 !important;
+}}
+/* The checkbox + Unduh button need a fixed width; left to a flex ratio they
+   shrink below their content and wrap.
+
+   `min-width` is not optional here. On narrow windows Streamlit sets
+   `min-width: calc(100% - 24px)` on every column, which at 480px resolves to
+   395px inside a 419px block — the actions column swallows the row, the grid
+   column is squeezed to 24px and the title track collapses to 0. Overriding
+   min-width pins it back to 6rem at every viewport. */
+.stHorizontalBlock:has(.nx9-tbl-row) > [data-testid="stColumn"]:last-child {{
+    flex: 0 0 6rem !important;
+    min-width: 6rem !important;
+}}
+/* Tighter gutter between the checkbox and the button, so 6rem is comfortable. */
+.stHorizontalBlock:has(.nx9-tbl-row) > [data-testid="stColumn"]:last-child
+    [data-testid="stHorizontalBlock"] {{
+    gap: 0.5rem !important;
+}}
+/* Empty placeholder cells in the caption row. They keep the row and artwork
+   classes so the narrow-screen media queries hide them in step with the data
+   rows, but they must neither paint anything nor give the caption row height. */
+.nx9-tbl-spacer {{
+    background: transparent;
+}}
+.nx9-tbl-spacer.nx9-tbl-art {{
+    height: 0;
+}}
 /* Line the actions up with the artwork.
    Streamlit reserves the row's height from the widget column and top-aligns
-   everything in the block, so the Unduh button and the 40px cover do not share
-   a baseline. The offsets are all fixed numbers, so they can be balanced
+   everything in the block, so the Unduh button and the cover do not share a
+   baseline. The offsets are fixed numbers, so they can be balanced
    arithmetically rather than with a fragile "centre it" override:
 
-     cover top   = 3px left-column margin + 1px border + 9px row padding = 13px
-     button top  = 13px top margin on the action column
+     cover top  = 3px left-column margin + 1px border + row padding-top
+     button top = this margin-top
 
-   The grid row is 60px (40px artwork + 2x9 padding + 2x1 border) while the
-   action slot needs only 50px, so the block height comes from the grid and the
-   two columns stop fighting over it. `:has()` keys off `.nx9-tbl-data` and is
-   deliberately not nested inside another `:has()` — a nested one makes the
-   selector invalid and the browser drops the rule silently. */
+   The padding is a clamp(), so the margin has to be the same clamp() plus the
+   4px of margin+border — a fixed px value here would drift out of alignment at
+   every viewport other than the one it was measured at.
+
+   Row height is art (44-48) + 2x padding (16-24) + 2 = 62-74px, while the action
+   slot only needs margin + 40px button + 5px = 57-61px, so the block always
+   takes its height from the grid and the two columns stop fighting over it.
+   `:has()` keys off `.nx9-tbl-data` and is deliberately not nested inside
+   another `:has()` — a nested one makes the selector invalid and the browser
+   drops the rule silently. */
 .stHorizontalBlock:has(.nx9-tbl-data) > [data-testid="stColumn"]:last-child {{
-    margin-top: 13px;
+    margin-top: calc(4px + clamp(0.5rem, 1vw, 0.75rem));
 }}
 
 /* Pill badge (e.g. part labels, backend tags). */
@@ -460,32 +560,52 @@ code, pre, .nx9-mono, [data-testid="stMetricValue"] {{
 /* Playlist header card. */
 .nx9-header {{
     display: flex;
-    gap: 24px;
+    gap: clamp(1rem, 2vw, 1.5rem);
     align-items: flex-end;
-    padding: 24px;
+    padding: clamp(1rem, 2vw, 1.5rem);
     border-radius: {RADIUS};
     border: 1px solid {BORDER};
     background: {SURFACE};
 }}
 .nx9-header-art {{
-    width: 200px;
-    height: 200px;
-    min-width: 200px;
+    width: clamp(9rem, 14vw, 12.5rem);
+    height: clamp(9rem, 14vw, 12.5rem);
+    min-width: clamp(9rem, 14vw, 12.5rem);
     border-radius: {RADIUS};
     object-fit: cover;
     border: 1px solid {BORDER};
     background: {BACKGROUND};
 }}
 .nx9-header-title {{
-    font-size: 30px;
+    font-size: clamp(1.5rem, 2.5vw, 1.875rem);
     font-weight: 700;
     color: {TEXT_PRIMARY};
     line-height: 1.2;
-    margin: 0 0 6px 0;
+    margin: 0 0 0.5rem 0;
 }}
 .nx9-header-meta {{
     color: {TEXT_SECONDARY};
-    font-size: 13px;
+    font-size: 0.8125rem;
+}}
+/* Phone / narrow window: a side-by-side card stops being readable once the
+   cover takes up a third of the width, so stack it and shrink the artwork.
+   Both the width and the height must be clamped — otherwise the box stops
+   being square and the cover gets stretched. */
+@media (max-width: 640px) {{
+    .nx9-header {{
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+    }}
+    .nx9-header-art,
+    .nx9-art-lg {{
+        width: clamp(6rem, 25vw, 8rem);
+        height: clamp(6rem, 25vw, 8rem);
+        min-width: clamp(6rem, 25vw, 8rem);
+    }}
+    .nx9-header-title {{
+        font-size: 1.5rem;
+    }}
 }}
 </style>
 """

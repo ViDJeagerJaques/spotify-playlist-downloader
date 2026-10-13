@@ -1020,6 +1020,9 @@ def _grid_select_state(key_set: str, ids: list[str]) -> set:
 TRACKS_PER_PAGE = 25
 
 # Cover gallery is a separate layout (R2): square tiles, several per row.
+# Streamlit's column API takes a fixed count (SpecType = int | Sequence[float])
+# and cannot react to the viewport, so the gallery keeps 4 columns and the tiles
+# are capped/centred in CSS instead — see .nx9-cover-tile in ui/theme.py.
 COVER_COLUMNS = 4
 COVERS_PER_PAGE = 20
 
@@ -1191,13 +1194,18 @@ def _render_table_header() -> None:
 
     Uses the same [grid | actions] split and the same ``grid-template-columns``
     as the rows, so every caption lands exactly on top of its column.
+
+    The first two cells carry the same classes as the data rows on purpose: the
+    narrow-screen media queries hide ``.nx9-tbl-num`` and drop the album track,
+    and the caption has to lose those columns too or its labels end up at
+    different x offsets than the data underneath.
     """
     left, _actions = st.columns([10, 1.4], vertical_alignment="center")
     with left:
         st.markdown(
             '<div class="nx9-tbl-row nx9-tbl-caption">'
-            '<div></div>'
-            '<div></div>'
+            '<div class="nx9-tbl-num nx9-tbl-spacer"></div>'
+            '<div class="nx9-tbl-art nx9-tbl-spacer"></div>'
             '<div class="nx9-tbl-head">Judul</div>'
             '<div class="nx9-tbl-head nx9-tbl-album">Album</div>'
             '<div class="nx9-tbl-head nx9-tbl-dur">Durasi</div>'
@@ -1368,7 +1376,7 @@ def _render_cover_gallery(rows: list, sel: set, start_page: int = 0) -> None:
     visible = rows[start:end]
 
     for i in range(0, len(visible), COVER_COLUMNS):
-        cols = st.columns(COVER_COLUMNS)
+        cols = st.columns(COVER_COLUMNS, gap="small")
         for col, t in zip(cols, visible[i:i + COVER_COLUMNS]):
             with col:
                 with st.container(border=True):
