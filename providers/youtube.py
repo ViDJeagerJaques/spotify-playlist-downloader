@@ -50,12 +50,15 @@ redistribute or publish the results.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import List, Optional
 
@@ -68,6 +71,10 @@ CACHE_DIR = Path(tempfile.gettempdir()) / "spotify_yt_cache"
 # How many YouTube candidates to inspect when scoring a match.
 SEARCH_CANDIDATES = 5
 
+# How many candidates we are willing to fully extract just to read the verified
+# badge. Each one is a real request, so this stays small on purpose.
+VERIFY_PROBE_LIMIT = 3
+
 # Reject a candidate whose duration is further than this from the Spotify
 # duration (seconds). Live/extended versions get filtered out this way.
 MAX_DURATION_DRIFT_S = 25
@@ -76,6 +83,13 @@ MAX_DURATION_DRIFT_S = 25
 # random reupload. Tuned by eyeballing real results, not by science.
 _OFFICIAL_HINTS = ("official audio", "official video", "topic", "provided to youtube")
 _PENALTY_HINTS = ("live", "cover", "remix", "sped up", "slowed", "nightcore", "reaction", "lyrics video hd")
+
+# Channels that upload translated lyrics on the artist's behalf. Several of them
+# carry the verified badge, so they need an explicit penalty.
+_LYRICS_CHANNEL_HINTS = (
+    "lyrics", "lyric", "lirik", "terjemahan", "subs", "7clouds", "cloudy",
+    "indolirik", "lost panda", "lagu", "dower", "video lyric",
+)
 
 
 def ffmpeg_path() -> Optional[str]:
@@ -105,6 +119,184 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
+def _norm_name(text: str) -> str:
+    """Normalise a person/band name for channel matching.
+
+    Separate from :func:`_norm` on purpose. ``_norm`` keeps only ``[a-z0-9]``,
+    which is right for the ASCII hint lists but destroys any non-Latin name:
+    "방탄소년단" would come out as an empty string and could never match a
+    channel. Here we fold accents ("Beyoncé" -> "beyonce") and keep every
+    unicode letter, so Korean, Japanese and Thai artists still compare.
+    """
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    cleaned = re.sub(r"[^\w]+", " ", stripped.lower(), flags=re.UNICODE)
+    return re.sub(r"\s+", " ", cleaned.replace("_", " ")).strip()
+
+
+# Splits "Don Toliver, Doja Cat", "A feat. B", "Simon & Garfunkel" into the
+# individual credited artists. A channel only ever carries one of them.
+_ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&|;|\bx\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|"
+                              r"\bfeaturing\b|\band\b|\bwith\b)\s*", re.IGNORECASE)
+
+
+def artist_name_variants(artist: str) -> list[str]:
+    """Normalised forms of every artist credited on the track.
+
+    Returns the whole name first, then each split part, so a track credited to a
+    single act still matches a channel that appends "Official" or "- Topic".
+    """
+    whole = _norm_name(artist)
+    parts = [whole] if whole else []
+    for chunk in _ARTIST_SPLIT_RE.split(artist or ""):
+        part = _norm_name(chunk)
+        if part and part not in parts:
+            parts.append(part)
+    return parts
+
+
+def channel_match_strength(channel: str, artist: str) -> float:
+    """How strongly a channel name identifies this artist: 0.0, 0.5 or 1.0.
+
+    Exact equality is the strongest evidence, then a name that contains the
+    artist (or the other way round) so "Adele" still recognises "AdeleVEVO".
+    Kept separate from :func:`channel_matches_artist` because an exact match
+    should outrank a looser one: "Taylor Swift" beats the fan reupload channel
+    "Taylor Swift Audios" even when the latter drifts less on duration.
+    """
+    chan = _norm_name(channel)
+    if not chan:
+        return 0.0
+    for part in artist_name_variants(artist):
+        if not part:
+            continue
+        if len(part) < 3 or len(chan) < 3:
+            if part == chan:
+                return 1.0
+        elif part == chan:
+            return 1.0
+        elif part in chan or chan in part:
+            return 0.5
+    return 0.0
+
+
+def channel_matches_artist(channel: str, artist: str) -> bool:
+    """True when a YouTube channel looks like it belongs to this artist.
+
+    This is the primary signal for picking the artist's own upload, and it is
+    free: the channel name already comes back from the flat search, so no extra
+    network request is involved.
+
+    Matches when either name contains the other ("Joji" vs "JojiVEVO",
+    "Reality Club" vs "REALITY CLUB"). Very short names are only compared for
+    equality, otherwise a 1-2 character credit would substring-match half the
+    catalogue.
+    """
+    return channel_match_strength(channel, artist) > 0.0
+
+
+def is_lyrics_channel(channel: str) -> bool:
+    """True for fan/lyrics-translation channels masquerading as the artist.
+
+    Several of these carry the verified badge, so the badge on its own is not a
+    usable signal — see the Indolirik / Lost Panda case in the module docs.
+    """
+    chan = _norm_name(channel)
+    return any(h in chan for h in _LYRICS_CHANNEL_HINTS)
+
+
+def _looks_like_artist_channel(cand: dict, artist: str) -> bool:
+    if not artist:
+        return False
+    channel = cand.get("channel") or cand.get("uploader") or ""
+    return bool(channel) and channel_matches_artist(channel, artist)
+
+
+def _verified_cache_path() -> Path:
+    return CACHE_DIR / "youtube_verified.json"
+
+
+_verified_lock = threading.Lock()
+
+# Counts how many full extractions we have performed, so the cost of the
+# official-channel preference stays measurable instead of a guess.
+PROBE_STATS = {"requested": 0, "network": 0, "cached": 0}
+
+
+def load_verified_cache() -> dict[str, bool]:
+    """``video_id -> channel_is_verified``. A broken file is simply ignored."""
+    try:
+        path = _verified_cache_path()
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        return {k: bool(v) for k, v in data.items() if isinstance(v, bool)}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_verified_cache(data: dict[str, bool]) -> None:
+    """Persist the badge cache, ignoring write failures."""
+    try:
+        with _verified_lock:
+            path = _verified_cache_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def probe_verified(video_ids: list[str]) -> dict[str, bool]:
+    """``video_id -> channel_is_verified``, fetching only what is not cached.
+
+    A flat search never populates the badge, so this is the only way to read it.
+    Results are memoised on disk: the same video showing up in two playlists, or
+    in a batch that gets re-run, costs nothing the second time.
+    """
+    import yt_dlp
+
+    ids = [i for i in dict.fromkeys(v for v in video_ids if v)]
+    if not ids:
+        return {}
+
+    cache = load_verified_cache()
+    missing = [i for i in ids if i not in cache]
+    if missing:
+        PROBE_STATS["requested"] += len(missing)
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "socket_timeout": 20,
+            "cachedir": str(CACHE_DIR / "ytdlp"),
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                for vid in missing:
+                    try:
+                        info = ydl.extract_info(
+                            f"https://www.youtube.com/watch?v={vid}",
+                            download=False)
+                    except Exception:  # noqa: BLE001 - one bad video must not
+                        cache[vid] = False   # abort the whole fallback path
+                        continue
+                    PROBE_STATS["network"] += 1
+                    if isinstance(info, dict):
+                        cache[vid] = bool(info.get("channel_is_verified"))
+        except Exception:  # noqa: BLE001 - verified is a nice-to-have
+            pass
+        save_verified_cache(cache)
+    else:
+        PROBE_STATS["cached"] += len(ids)
+
+    return {i: cache[i] for i in ids if i in cache}
+
+
+
 def build_query(track: Track) -> str:
     """Search query for a track: '<artist> <title> official audio'."""
     artist = (track.artist or "").split(",")[0].strip()  # primary artist only
@@ -112,11 +304,17 @@ def build_query(track: Track) -> str:
     return f"{artist} {title} official audio".strip()
 
 
-def score_candidate(cand: dict, want_seconds: int) -> float:
+def score_candidate(cand: dict, want_seconds: int, artist: str = "") -> float:
     """Score a yt-dlp search entry against the track we want.
 
     Higher is better. Returns a negative number for candidates that should be
     rejected outright (duration far off).
+
+    ``artist`` is the Spotify artist string. It is optional so existing callers
+    and tests keep working, but :meth:`YouTubeClient._pick_best` always passes
+    it: matching the channel against the artist name is what stops us from
+    downloading "Glimpse of Us" off a random cover channel instead of Joji's own
+    upload.
     """
     dur = cand.get("duration") or 0
     if want_seconds and dur:
@@ -132,6 +330,38 @@ def score_candidate(cand: dict, want_seconds: int) -> float:
         score += 3.0
     if any(h in blob for h in _PENALTY_HINTS):
         score -= 4.0
+
+    # --- the artist's own channel: the strongest and cheapest signal we have.
+    # The channel name already arrived with the flat search result, so this costs
+    # nothing. An exact name match is worth more than a loose one so a fan
+    # reupload channel ("Taylor Swift Audios") cannot outrank the real thing
+    # purely on a smaller duration drift.
+    channel = cand.get("channel") or cand.get("uploader") or ""
+    strength = channel_match_strength(channel, artist)
+    if strength >= 1.0:
+        score += 6.0
+    elif strength > 0.0:
+        score += 4.5
+
+    # --- verified badge: supporting evidence only. Indolirik and Lost Panda are
+    # both verified lyric channels, so this can never outrank the name match.
+    if cand.get("channel_is_verified"):
+        score += 3.0
+
+    # --- lyrics / translation uploads. Deliberately skipped when the channel is
+    # the artist itself: real acts publish their own "official lyric video"
+    # versions and those must stay on top.
+    #
+    # Two strengths. A channel *named* as a lyrics channel is strong evidence of
+    # a rip, and has to outweigh the +3 verified badge plus a large view count,
+    # otherwise Indolirik (verified, 30M views) still beats a bland upload. Only
+    # the title mentioning lyrics is weak evidence — plenty of legitimate
+    # uploads are titled "Official Lyric Video" — so it gets half the penalty.
+    if channel and strength == 0.0:
+        if is_lyrics_channel(channel):
+            score -= 5.0
+        elif is_lyrics_channel(cand.get("title", "")):
+            score -= 3.0
 
     # Prefer results with a real view count (popular = more likely correct).
     views = cand.get("view_count") or 0
@@ -215,7 +445,7 @@ class YouTubeClient:
 
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-        best = self._pick_best(query, want_s)
+        best = self._pick_best(query, want_s, track.artist or "")
         if best is None:
             raise ServiceError(
                 f"Tidak ketemu audio YouTube yang cocok untuk "
@@ -229,8 +459,22 @@ class YouTubeClient:
 
     # ------------------------------------------------------------ helpers
     @staticmethod
-    def _pick_best(query: str, want_seconds: int) -> Optional[dict]:
-        """Run a yt-dlp search and return the highest-scoring candidate."""
+    def _pick_best(query: str, want_seconds: int,
+                   artist: str = "") -> Optional[dict]:
+        """Run a yt-dlp search and return the highest-scoring candidate.
+
+        Two-stage so the official-channel preference stays cheap:
+
+        1. Flat search (one request) gives title, channel and duration for the
+           candidates, which is already enough to recognise the artist's own
+           channel in the large majority of tracks.
+        2. Only if nothing matched the artist name do we spend extra requests
+           reading ``channel_is_verified`` on the top few candidates, and only
+           for those the disk cache does not already know about.
+
+        Extracting every candidate in full instead would cost ~0.5s each, i.e.
+        ~2.5s per track and roughly nine extra minutes on a 213-track playlist.
+        """
         import yt_dlp
 
         opts = {
@@ -261,12 +505,42 @@ class YouTubeClient:
         if not entries:
             return None
 
-        scored = [(score_candidate(e, want_seconds), e) for e in entries]
+        scored = [(score_candidate(e, want_seconds, artist), e) for e in entries]
         scored = [(s, e) for s, e in scored if s > 0]
         if not scored:
             return None
         scored.sort(key=lambda p: p[0], reverse=True)
+
+        # Stage 2. If the leader is already the artist's own channel we are done
+        # and never touch the network again.
+        if not _looks_like_artist_channel(scored[0][1], artist):
+            YouTubeClient._apply_verified_badges(scored, want_seconds, artist)
+            scored.sort(key=lambda p: p[0], reverse=True)
+
         return scored[0][1]
+
+    @staticmethod
+    def _apply_verified_badges(scored: list, want_seconds: int,
+                               artist: str) -> None:
+        """Fill in ``channel_is_verified`` for the top candidates and rescore.
+
+        Only reached when the flat results had no artist-named channel at all,
+        which is the minority case (measured ~1 track in 12). The verified badge
+        is then the only extra evidence available, so it is worth the request.
+        """
+        want_ids = [e.get("id") for _s, e in scored[:VERIFY_PROBE_LIMIT] if e.get("id")]
+        if not want_ids:
+            return
+        flags = probe_verified(want_ids)
+        if not flags:
+            return
+        rescored = []
+        for s, e in scored:
+            vid = e.get("id")
+            if vid in flags:
+                e["channel_is_verified"] = flags[vid]
+            rescored.append((score_candidate(e, want_seconds, artist), e))
+        scored[:] = rescored
 
     @staticmethod
     def _download(cand: dict, dest: Path, track: Track) -> None:
