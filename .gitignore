@@ -54,3 +54,6 @@ desktop.ini
 
 # Logs
 *.log
+
+# Downloaded MP3s, metadata JSON and batch ZIPs (see providers.base.cache_dir)
+.cache/

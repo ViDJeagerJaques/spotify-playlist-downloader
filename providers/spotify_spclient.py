@@ -56,7 +56,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .base import ServiceError, upgrade_cover_url
+from .base import ServiceError, cache_dir, upgrade_cover_url
 
 SPCLIENT_BASE = "https://spclient.wg.spotify.com/playlist/v2/playlist"
 SPCLIENT_META = "https://spclient.wg.spotify.com/metadata/4/track/{gid}"
@@ -514,9 +514,8 @@ def _one_track(track_id: str) -> dict:
 # cache — so re-loading the same playlist costs nothing
 # --------------------------------------------------------------------------
 def _cache_path(name: str) -> Path:
-    import tempfile
-
-    return Path(tempfile.gettempdir()) / "spotify_yt_cache" / f"spclient_{name}.json"
+    # Next to the project rather than the system temp folder — see base.cache_dir().
+    return cache_dir() / f"spclient_{name}.json"
 
 
 _cache_lock = threading.Lock()

@@ -7,10 +7,31 @@ one of those services.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Optional
+
+
+def cache_dir() -> Path:
+    """Single source of truth for where this app stores anything on disk.
+
+    Every provider used to call ``tempfile.gettempdir()``, which on Windows is
+    always ``C:\\Users\\<you>\\AppData\\Local\\Temp`` no matter which drive the
+    project lives on. Downloaded MP3s, metadata JSON and batch ZIPs all piled up
+    there silently — roughly 5MB per track, so a 200-track playlist is about a
+    gigabyte on the system disk.
+
+    Default is now ``<project>/.cache``, overridable with ``SPOTIFY_CACHE_DIR``.
+    Lives here rather than in one of the providers because three separate
+    modules need it and importing between providers would create cycles.
+    """
+    override = os.environ.get("SPOTIFY_CACHE_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parents[1] / ".cache"
 
 
 class ProviderId(str, Enum):

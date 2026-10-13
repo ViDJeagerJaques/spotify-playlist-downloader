@@ -43,7 +43,7 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .base import ServiceError, Track, upgrade_cover_url
+from .base import ServiceError, Track, cache_dir, upgrade_cover_url
 
 EMBED_BASE = "https://open.spotify.com/embed/{kind}/{sid}"
 OEMBED_URL = ("https://open.spotify.com/oembed?url="
@@ -58,7 +58,7 @@ EMBED_ITEM_LIMIT = 100
 # image for the whole playlist, so the real per-album artwork must come from the
 # Web API (GET /tracks/{id}). Caching means re-loading the same playlist — or a
 # different playlist containing the same tracks — costs zero requests.
-CACHE_DIR = Path(tempfile.gettempdir()) / "spotify_yt_cache"
+CACHE_DIR = cache_dir()
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")

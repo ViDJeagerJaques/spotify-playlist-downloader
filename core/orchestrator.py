@@ -33,7 +33,6 @@ from __future__ import annotations
 import random
 import re
 import shutil
-import tempfile
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -43,8 +42,20 @@ from typing import Callable, List, Optional
 
 import requests
 
-from providers.base import CaptchaRequiredError, ProviderId, ServiceError, Track
+from providers.base import CaptchaRequiredError, ProviderId, ServiceError, Track, cache_dir
 from providers.mock import MockProvider, _mock_mp3_bytes
+
+
+def _scratch_dir() -> Path:
+    """Where per-run staging folders and batch ZIPs are written.
+
+    Kept beside the project instead of ``tempfile.gettempdir()``: the latter is
+    always on C:, and a batch ZIP for a large playlist is hundreds of megabytes.
+    Imported indirectly through :func:`providers.base.cache_dir` so the
+    orchestrator does not depend on a specific provider being importable.
+    """
+    return cache_dir()
+
 
 
 class DownloadMode(str, Enum):
@@ -268,7 +279,8 @@ class BatchOrchestrator:
         cleanup_on_finish = self.mode == DownloadMode.STREAM_LOCAL
 
         if cleanup_on_finish:
-            temp_dir = Path(tempfile.mkdtemp(prefix="spl_dl_"))
+            temp_dir = _scratch_dir() / "spl_dl_"
+            temp_dir.mkdir(parents=True, exist_ok=True)
             self._ensure_fetcher()
 
         try:
@@ -345,8 +357,10 @@ class BatchOrchestrator:
             return summary
 
         cleanup_on_finish = self.mode == DownloadMode.STREAM_LOCAL
-        temp_dir: Optional[Path] = Path(tempfile.mkdtemp(prefix="spl_rt_")) if cleanup_on_finish else None
+        temp_dir: Optional[Path] = None
         if cleanup_on_finish:
+            temp_dir = _scratch_dir() / "spl_rt_"
+            temp_dir.mkdir(parents=True, exist_ok=True)
             self._ensure_fetcher()
 
         try:
@@ -405,7 +419,18 @@ class BatchOrchestrator:
         return summary
 
     def _make_zip(self, folder: Path) -> Path:
-        zip_path = Path(tempfile.gettempdir()) / f"spl_{int(time.time()*1000)}.zip"
+        zip_dir = _scratch_dir()
+        zip_dir.mkdir(parents=True, exist_ok=True)
+        # Zips from earlier sessions are dead weight by now (the browser has
+        # long since downloaded them) and used to accumulate in the system temp
+        # folder forever. Sweep them before writing another one. Imported lazily
+        # so the orchestrator keeps working if the provider module is trimmed.
+        try:
+            from providers.youtube import purge_stale_zips
+            purge_stale_zips()
+        except Exception:  # noqa: BLE001
+            pass
+        zip_path = zip_dir / f"spl_{int(time.time()*1000)}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in sorted(folder.glob("*.mp3")):
                 zf.write(f, arcname=f.name)
@@ -419,7 +444,14 @@ class BatchOrchestrator:
         only be combined with previous successes by copying the old ZIP.
         The old file is removed (best effort) after the merge succeeds.
         """
-        merged = Path(tempfile.gettempdir()) / f"spl_{int(time.time()*1000)}_r.zip"
+        zip_dir = _scratch_dir()
+        zip_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            from providers.youtube import purge_stale_zips
+            purge_stale_zips()
+        except Exception:  # noqa: BLE001
+            pass
+        merged = zip_dir / f"spl_{int(time.time()*1000)}_r.zip"
         with zipfile.ZipFile(old_zip) as zin:
             old_names = set(zin.namelist())
             with zipfile.ZipFile(merged, "w", zipfile.ZIP_DEFLATED) as zout:

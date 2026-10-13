@@ -273,6 +273,11 @@ def sidebar() -> None:
             st.rerun()
 
 
+# NOTE: main() calls sidebar_nav(), not this function, so nothing below this
+# point is ever rendered. Kept because it still holds the CAPTCHA token flow the
+# legacy token-based backends used, and its translations are still referenced.
+
+
 def _show_token_help(lang: str) -> None:
     L = lambda k, **fmt: i18n.tr(lang, k, **fmt)  # noqa: E731
     st.markdown(f"**{L('help_token.title')}**")
@@ -376,6 +381,46 @@ def sidebar_nav() -> None:
         if st.session_state.get("playlist_url") and st.button("Ganti playlist", use_container_width=True):
             _reset_playlist_state()
             _go("home")
+
+        st.divider()
+        _sidebar_cache_panel()
+
+
+def _sidebar_cache_panel() -> None:
+    """Cache size plus a two-step "clear cache" control.
+
+    Deleting the cache throws away every downloaded MP3, so it never happens on a
+    single click and never automatically — the user has to tick the confirmation
+    box first. Lives here rather than in :func:`sidebar`, which ``main()`` never
+    calls (that function is legacy leftovers from the token-based backends).
+    """
+    from providers.youtube import CACHE_DIR, cache_usage, clear_cache
+
+    lang = st.session_state.lang
+    L = lambda k, **fmt: i18n.tr(lang, k, **fmt)  # noqa: E731
+
+    files, total = cache_usage()
+    with st.expander(L("sidebar.cache_title"), expanded=False):
+        st.caption(L("sidebar.cache_help"))
+        if files == 0:
+            st.caption(L("sidebar.cache_never"))
+        else:
+            st.caption(L("sidebar.cache_usage", files=files, mb=total / 1e6,
+                         path=CACHE_DIR))
+            confirm = st.checkbox(L("sidebar.cache_confirm"),
+                                  key="cache_confirm_wipe", value=False)
+            if st.button(L("sidebar.cache_btn"), use_container_width=True,
+                         disabled=not confirm):
+                gone, freed = clear_cache()
+                # Any path we are still holding now points at deleted files.
+                for k in ("ui_batch", "cover_zip", "batch"):
+                    st.session_state.pop(k, None)
+                st.session_state.cache_notice = L("sidebar.cache_cleared",
+                                                  files=gone, mb=freed / 1e6)
+                st.rerun()
+        notice = st.session_state.pop("cache_notice", None)
+        if notice:
+            st.success(notice)
 
 
 def _reset_playlist_state() -> None:
@@ -702,10 +747,12 @@ def _fetch_bytes_with_headers(resolved: str, headers: dict) -> bytes:
 
 def _build_cover_zip(tracks: list) -> Path:
     """Download cover terpilih lalu kumpulkan jadi satu ZIP."""
-    import tempfile
     import zipfile
 
-    staging = Path(tempfile.mkdtemp(prefix="spl_cover_"))
+    from providers.youtube import SCRATCH_DIR, purge_stale_zips
+
+    staging = SCRATCH_DIR / "spl_cover_"
+    staging.mkdir(parents=True, exist_ok=True)
     headers = {"User-Agent": ui_data.download_headers().get("User-Agent", "")}
     ok = 0
     for t in tracks:
@@ -718,7 +765,8 @@ def _build_cover_zip(tracks: list) -> Path:
             ok += 1
         except Exception:  # noqa: BLE001 - skip covers that fail
             continue
-    zip_path = Path(tempfile.gettempdir()) / f"spl_cover_{int(time.time()*1000)}.zip"
+    purge_stale_zips()
+    zip_path = SCRATCH_DIR / f"spl_cover_{int(time.time()*1000)}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in sorted(staging.glob("*.jpg")):
             zf.write(f, arcname=f.name)

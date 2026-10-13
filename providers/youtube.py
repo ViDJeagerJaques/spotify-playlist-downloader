@@ -55,18 +55,28 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from .base import ProviderId, ResolveResult, ServiceError, Track
+from .base import ProviderId, ResolveResult, ServiceError, Track, cache_dir
 from .spotify_meta import SpotifyMeta
 
-# Where yt-dlp should keep its scratch files. Cleaned per-run.
-CACHE_DIR = Path(tempfile.gettempdir()) / "spotify_yt_cache"
+# Where downloaded MP3s, yt-dlp scratch files and the download metadata live.
+# See providers.base.cache_dir() for why this is not the system temp folder.
+CACHE_DIR = cache_dir()
+
+# Zips and per-run scratch directories built by the batch paths also land here,
+# so nothing this app writes ends up in the system temp folder.
+SCRATCH_DIR = CACHE_DIR
+
+# Stale zips older than this are removed when a new batch is packed. They are
+# never needed after the browser has fetched them, and they otherwise pile up in
+# the temp folder indefinitely.
+STALE_ZIP_MAX_AGE_S = 24 * 60 * 60
 
 # How many YouTube candidates to inspect when scoring a match.
 SEARCH_CANDIDATES = 5
@@ -216,11 +226,114 @@ def _verified_cache_path() -> Path:
     return CACHE_DIR / "youtube_verified.json"
 
 
+def sidecar_path(mp3: Path) -> Path:
+    """``foo.mp3`` -> ``foo.json``: the record of which video produced it."""
+    return mp3.with_suffix(".json")
+
+
+def write_resolution(mp3: Path, cand: dict, track: Track,
+                     want_seconds: int = 0) -> bool:
+    """Record which YouTube video an MP3 came from, next to the MP3.
+
+    Best-effort: if the write fails the download still counts as successful, we
+    just lose the fast-path next time.
+    """
+    try:
+        payload = {
+            "video_id": cand.get("id") or "",
+            "channel": cand.get("channel") or cand.get("uploader") or "",
+            "title": cand.get("title") or "",
+            "duration": cand.get("duration") or 0,
+            "spotify_duration": want_seconds,
+            "artist": track.artist or "",
+            "track_title": track.title or "",
+            "resolved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        path = sidecar_path(mp3)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        tmp.replace(path)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def read_resolution(mp3: Path) -> Optional[dict]:
+    """The sidecar for this MP3, or ``None`` when it is missing/unreadable.
+
+    ``None`` is what makes a cached file count as stale: without a record of the
+    source video we cannot know whether it came from the artist's own channel.
+    """
+    path = sidecar_path(mp3)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def cache_usage() -> tuple[int, int]:
+    """``(file_count, total_bytes)`` for everything this app keeps on disk."""
+    if not CACHE_DIR.exists():
+        return 0, 0
+    count = 0
+    total = 0
+    for f in CACHE_DIR.rglob("*"):
+        if f.is_file():
+            count += 1
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
+    return count, total
+
+
+def clear_cache() -> tuple[int, int]:
+    """Delete the cache directory. Only ever called from the sidebar button.
+
+    Returns ``(files_removed, bytes_freed)``. Never called automatically.
+    """
+    files, total = cache_usage()
+    if CACHE_DIR.exists():
+        shutil.rmtree(CACHE_DIR, ignore_errors=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return files, total
+
+
+def purge_stale_zips(max_age_s: int = STALE_ZIP_MAX_AGE_S) -> int:
+    """Remove batch ZIPs older than ``max_age_s``. Returns how many went.
+
+    These are written per batch and never cleaned up by the request that created
+    them, so they used to pile up in the system temp folder indefinitely. Called
+    before packing a new one; a failure here must never break the download.
+    """
+    if not SCRATCH_DIR.exists():
+        return 0
+    cutoff = time.time() - max_age_s
+    removed = 0
+    for z in SCRATCH_DIR.glob("spl_*.zip"):
+        try:
+            if z.is_file() and z.stat().st_mtime < cutoff:
+                z.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 _verified_lock = threading.Lock()
 
 # Counts how many full extractions we have performed, so the cost of the
 # official-channel preference stays measurable instead of a guess.
 PROBE_STATS = {"requested": 0, "network": 0, "cached": 0}
+
+# How many cached MP3s were found without a sidecar and therefore re-resolved.
+# Surfaced in the UI so the effect of a scoring change is actually visible.
+RESOLVE_STATS = {"cache_hit": 0, "cache_stale": 0}
 
 
 def load_verified_cache() -> dict[str, bool]:
@@ -439,11 +552,22 @@ class YouTubeClient:
         query = build_query(track)
 
         dest = CACHE_DIR / f"{track.track_token or abs(hash(query))}.mp3"
-        if dest.exists() and dest.stat().st_size > 0:
-            self._local_files[str(dest)] = str(dest)
-            return str(dest)
-
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        # A cached MP3 is only trusted when we also know which video produced
+        # it. Without that record the file may predate the official-channel
+        # matching and still be a fan upload, and improving the scoring would
+        # have no visible effect for every track ever downloaded before. A MP3
+        # with no sidecar is therefore treated as stale and re-resolved; it is
+        # overwritten in place rather than deleted, and nothing is removed unless
+        # the user asks for it via the sidebar button.
+        if dest.exists() and dest.stat().st_size > 0:
+            record = read_resolution(dest)
+            if record is not None:
+                RESOLVE_STATS["cache_hit"] += 1
+                self._local_files[str(dest)] = str(dest)
+                return str(dest)
+            RESOLVE_STATS["cache_stale"] += 1
 
         best = self._pick_best(query, want_s, track.artist or "")
         if best is None:
@@ -454,6 +578,7 @@ class YouTubeClient:
             )
 
         self._download(best, dest, track)
+        write_resolution(dest, best, track, want_s)
         self._local_files[str(dest)] = str(dest)
         return str(dest)
 
@@ -629,5 +754,13 @@ class YouTubeClient:
         return bool(url) and os.path.exists(url) and not url.startswith(("http://", "https://"))
 
     def cleanup_cache(self) -> None:
-        """Remove scratch files. Safe to call after a batch finishes."""
-        shutil.rmtree(CACHE_DIR, ignore_errors=True)
+        """Drop only the throwaway yt-dlp scratch files.
+
+        This used to ``shutil.rmtree(CACHE_DIR)``, i.e. delete every cached MP3,
+        the sidecar records and the metadata caches. Nothing calls it today, but
+        leaving that in place means one future caller silently wipes the user's
+        whole cache — and the app's rule is that the cache is only ever removed
+        when the user asks for it (the sidebar button). Stale batch ZIPs are
+        cleaned separately by :func:`purge_stale_zips`, on their own age policy.
+        """
+        shutil.rmtree(CACHE_DIR / "ytdlp", ignore_errors=True)

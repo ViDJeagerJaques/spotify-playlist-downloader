@@ -4,7 +4,9 @@ Run:  .venv/Scripts/python.exe tests/test_youtube.py
 """
 from __future__ import annotations
 
+import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -185,6 +187,122 @@ check("empty channel never matches anything",
 check("drift still rejects even the artist's own channel",
       score_candidate({**joji, "duration": _dur + 200}, _dur, "Joji") < 0)
 check("probe limit stays small", VERIFY_PROBE_LIMIT <= 3)
+
+
+# ----------------------------------------------------------- cache behaviour
+# Offline: no network, no ffmpeg. The point is the freshness policy, which is
+# what makes an improved scoring function actually take effect.
+print("\n[cache]")
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
+from providers import youtube as yt  # noqa: E402
+from providers.base import cache_dir  # noqa: E402
+
+_real_cache = yt.CACHE_DIR
+_scratch = Path(tempfile.mkdtemp(prefix="yt_cache_test_"))
+yt.CACHE_DIR = _scratch
+yt.SCRATCH_DIR = _scratch
+try:
+    # Cache lives beside the project, never in the system temp folder.
+    check("cache default is next to the project, not AppData",
+          "appdata" not in str(cache_dir()).lower()
+          and cache_dir().name == ".cache")
+    prev = os.environ.get("SPOTIFY_CACHE_DIR")
+    os.environ["SPOTIFY_CACHE_DIR"] = str(_scratch)
+    try:
+        check("cache honours SPOTIFY_CACHE_DIR", cache_dir() == _scratch)
+    finally:
+        if prev is None:
+            os.environ.pop("SPOTIFY_CACHE_DIR", None)
+        else:
+            os.environ["SPOTIFY_CACHE_DIR"] = prev
+
+    mp3 = _scratch / "abc.mp3"
+    mp3.write_bytes(b"ID3" + bytes(2048))
+
+    check("mp3 without sidecar counts as stale",
+          yt.read_resolution(mp3) is None)
+
+    yt.write_resolution(mp3, {"id": "ZEY9UCzzbcQ", "channel": "Joji",
+                               "title": "Sanctuary", "duration": 180},
+                        Track(data="x", title="Sanctuary", artist="Joji"), 180)
+    rec = yt.read_resolution(mp3)
+    check("sidecar records the chosen video", rec is not None
+          and rec.get("video_id") == "ZEY9UCzzbcQ")
+    check("sidecar records the channel", rec.get("channel") == "Joji")
+    check("sidecar records duration", rec.get("duration") == 180)
+    check("sidecar has a timestamp", bool(rec.get("resolved_at")))
+
+    yt.sidecar_path(mp3).write_text("{not json", encoding="utf-8")
+    check("corrupt sidecar also counts as stale",
+          yt.read_resolution(mp3) is None)
+
+    # A stale mp3 must actually be re-resolved, and a fresh one must not be.
+    yt.RESOLVE_STATS.update({"cache_hit": 0, "cache_stale": 0})
+    picked: list = []
+    orig_pick = yt.YouTubeClient._pick_best
+    orig_dl = yt.YouTubeClient._download
+
+    def fake_pick(query, want, artist=""):
+        picked.append(query)
+        return {"id": "NEW1", "channel": "Joji", "title": "Sanctuary",
+                "duration": 180}
+
+    def fake_dl(cand, dest, track):
+        Path(dest).write_bytes(b"ID3" + bytes(4096))
+
+    yt.YouTubeClient._pick_best = staticmethod(fake_pick)
+    yt.YouTubeClient._download = staticmethod(fake_dl)
+    try:
+        client = yt.YouTubeClient()
+        t = Track(data="x", track_token="abc", title="Sanctuary",
+                  artist="Joji", duration_ms=180000)
+
+        client.resolve_track(t)
+        check("stale cache triggers a re-resolve", len(picked) == 1
+              and yt.RESOLVE_STATS["cache_stale"] == 1)
+        check("re-resolve writes the sidecar",
+              yt.read_resolution(_scratch / "abc.mp3") is not None)
+
+        client.resolve_track(t)
+        check("fresh cache is reused without searching", len(picked) == 1
+              and yt.RESOLVE_STATS["cache_hit"] == 1)
+
+        yt.sidecar_path(_scratch / "abc.mp3").unlink()
+        client.resolve_track(t)
+        check("removing the sidecar makes it stale again", len(picked) == 2)
+
+        # cleanup_cache must not nuke the user's downloads.
+        client.resolve_track(t)
+        before = yt.cache_usage()[1]
+        client.cleanup_cache()
+        check("cleanup_cache keeps the mp3 and sidecar",
+              (_scratch / "abc.mp3").exists() and before > 0)
+
+        # stale zip sweep
+        old_zip = _scratch / "spl_old.zip"
+        new_zip = _scratch / "spl_new.zip"
+        for z in (old_zip, new_zip):
+            z.write_bytes(b"PK\x03\x04")
+        stale_mtime = time.time() - (yt.STALE_ZIP_MAX_AGE_S + 3600)
+        os.utime(old_zip, (stale_mtime, stale_mtime))
+        removed = yt.purge_stale_zips()
+        check("stale zip (>24h) removed", removed == 1 and not old_zip.exists())
+        check("fresh zip kept", new_zip.exists())
+
+        files, total = yt.cache_usage()
+        check("cache_usage counts files and bytes", files > 0 and total > 0)
+        gone, freed = yt.clear_cache()
+        check("clear_cache reports what it freed",
+              gone == files and freed == total)
+        check("clear_cache leaves an empty folder behind",
+              _scratch.exists() and yt.cache_usage() == (0, 0))
+    finally:
+        yt.YouTubeClient._pick_best = orig_pick
+        yt.YouTubeClient._download = orig_dl
+finally:
+    yt.CACHE_DIR = _real_cache
+    shutil.rmtree(_scratch, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ provider

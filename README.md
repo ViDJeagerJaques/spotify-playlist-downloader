@@ -123,7 +123,7 @@ dalam HTML-nya, dan token itu bisa dipakai ke endpoint internal `spclient`:
 
 Terverifikasi pada playlist **213 lagu → 213/213 terbaca**, tanpa login sama
 sekali (metadata 213/213, cover 213/213). Hasil disimpan di cache
-(`%TEMP%/spotify_yt_cache/spclient_tracks.json` dan `spclient_meta.json`).
+(`.cache/spclient_tracks.json` dan `spclient_meta.json`).
 
 **Performa** (diukur di PC lokal, playlist 213 lagu):
 
@@ -306,6 +306,41 @@ Catatan: `st.columns()` tidak punya mode responsif di Python
 > rerun penuh setiap interaksi. Yang dikirim hanya warna, tipografi, dan
 > border/radius — tanpa animasi.
 
+### Cache dan ruang disk
+
+Semua yang ditulis app ini — MP3 hasil unduhan, metadata JSON, ZIP batch, dan
+staging per-run — sekarang tinggal di satu folder:
+
+```
+<folder proyek>/.cache
+```
+
+Override dengan env var `SPOTIFY_CACHE_DIR`. Sumber tunggalnya
+`providers/base.py :: cache_dir()`; ketiga provider memakainya supaya tidak ada
+lagi salinan path yang berbeda-beda.
+
+Kenapa tidak lagi di temp folder? `tempfile.gettempdir()` di Windows selalu
+menunjuk ke `C:\Users\<kamu>\AppData\Local\Temp` **walau proyeknya ada di drive
+lain**. Cache ini tumbuh ±5 MB per lagu, jadi playlist 213 lagu ≈ 1 GB yang
+mendarat diam-diam di disk sistem.
+
+**`.mp3` selalu berpasangan dengan `.json`.** Sidecar itu mencatat video mana
+yang dipakai:
+
+```json
+{ "video_id": "ZEY9UCzzbcQ", "channel": "Joji", "duration": 180,
+  "resolved_at": "2026-10-13T05:02:41+00:00" }
+```
+
+Kalau `.mp3` ada tapi `.json` tidak, file itu dianggap **basi** dan di-resolve
+ulang — tanpa catatan ini, perbaikan pemilihan channel tidak akan terasa untuk
+lagu yang sudah pernah diunduh sebelum. File lama **tidak dihapus otomatis**,
+cuma ditimpa.
+
+ZIP batch yang berumur > 24 jam dihapus otomatis sebelum ZIP baru dibuat
+(`purge_stale_zips`). Selain itu ada tombol **"Bersihkan cache"** di sidebar —
+wajib dicentang konfirmasi dulu, dan tidak pernah jalan sendiri.
+
 ### Cover per lagu
 
 Halaman embed playlist hanya menyediakan **satu gambar** untuk seluruh playlist,
@@ -314,7 +349,7 @@ per lagu diambil dari endpoint anonim: `/embed/track/{id}` untuk metadata dan
 **oEmbed** untuk artwork (hash gambarnya identik dengan yang dikembalikan Web API).
 
 - Paralel maks 8 worker, jeda 0,15 s antar request.
-- Di-cache di `%TEMP%/spotify_yt_cache/spclient_tracks.json`, jadi playlist lain
+- Di-cache di `.cache/spclient_tracks.json`, jadi playlist lain
   yang punya lagu sama tidak request ulang.
 - **Resolusi 640×640.** oEmbed mengembalikan prefix `ab67616d00001e02` (300×300,
   ~45 KB) yang terlihat pecah saat dibuka besar. `upgrade_cover_url()` di
