@@ -29,11 +29,36 @@ benar** ke file hasilnya (judul, artist, album, label, tahun, cover).
 > Menawarkannya di dropdown hanya menghasilkan error kosong, jadi opsinya
 > dihapus — bukan disembunyikan. Lihat [Riwayat perubahan](# riwayat-penghentian-backend) di bawah.
 
+## Dua cara memakai aplikasi ini
+
+### A. Pakai `.exe` — tidak perlu Python
+
+Unduh `SpotDL.exe` dari halaman **Releases** repo ini, lalu dobel klik.
+
+Windows akan menampilkan peringatan SmartScreen karena file ini belum
+ditandatangani digital: **More info → Run anyway**. Jendela aplikasi terbuka
+sekitar 10–20 detik setelah diklik (proses ekstrak internal).
+
+Yang perlu diperhatikan:
+
+- **Tidak ada instalasi apa pun.** Python, yt-dlp, dan ffmpeg sudah di dalamnya.
+- **Tidak ada jendela terminal hitam** — build memakai `--windowed`.
+- Menutup jendela aplikasi **mematikan semua prosesnya** (≈5 detik).
+- **Log tidak tersedia.** Karena ini aplikasi GUI, `print()` dari Streamlit
+  tidak punya console tujuan. Kalau perlu melihat error, jalankan dari source
+  (cara B) — di sana lognya tampil normal.
+
+### B. Jalankan dari source — untuk pengembangan
+
+Butuh Python, dan hasilnya sama persis dengan `.exe`.
+
 ## Instalasi
 
-**1. Python 3.10+**
+**1. Python 3.10+** (diuji dengan 3.11.15)
 
 ```powershell
+git clone https://github.com/ViDJeagerJaques/spotify-playlist-downloader.git
+cd spotify-playlist-downloader
 py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -52,6 +77,15 @@ sudo apt install ffmpeg            # Debian/Ubuntu
 ```powershell
 pip install -U yt-dlp
 ```
+
+**4. Jalankan:**
+
+```powershell
+.venv\Scripts\python -m streamlit run app.py
+```
+
+Browser terbuka di `http://localhost:8501`. Tempel URL playlist Spotify di
+halaman Home, lalu klik **Load Playlist**.
 
 ## Credential Spotify — tidak wajib untuk playlist publik
 
