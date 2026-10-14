@@ -84,9 +84,15 @@ echo "=== Building ======================================================"
 #               close when the app window does -- the user has to kill both by
 #               hand. Verified: with the flag, closing the window takes the whole
 #               process tree with it (0 processes left after ~4s).
+# --runtime-hook : enables pywebview downloads. Without it every
+#   st.download_button is dead in the .exe -- no error, no dialog, no file,
+#   because pywebview's default ALLOW_DOWNLOADS=False makes it cancel silently.
+#   The hook must run in the bootstrap process that opens the window, which is
+#   exactly what a PyInstaller runtime hook does.
 streamlit-desktop-app build app.py \
     --name SpotDL \
     --pyinstaller-options --onefile --noconfirm --windowed \
+    --runtime-hook runtime_hook_downloads.py \
     "${ADD_DATA[@]}"
 
 # PyInstaller appends .exe on Windows only, so resolve the path once and reuse it
@@ -117,6 +123,15 @@ for m in ('providers', 'ui', 'core'):
         bad.append(m)
 ff = [x for x in toc if 'ffmpeg' in x.lower()]
 print('  ffmpeg    :', ff or 'absent')
+
+# The download hook must be compiled into the PYZ. Missing it means every
+# download button silently does nothing, and nothing on screen says why.
+hook = [x for x in toc if 'runtime_hook' in x.lower()]
+print('  hook      :', hook or 'MISSING')
+if not hook:
+    print('[FAIL] runtime_hook_downloads missing - download buttons will be dead')
+    sys.exit(1)
+
 print('  bundle    :', 'OK' if not bad else 'MISSING ' + ', '.join(bad))
 sys.exit(1 if bad else 0)
 PY

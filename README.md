@@ -535,6 +535,40 @@ build_exe.bat          # Windows      (build_exe.sh untuk Linux/macOS)
 Hasil terukur di mesin ini: **dist/SpotDL.exe = 121,8 MB** (127.712.405 byte),
 lengkap dengan `app.py`, paket `providers/` `ui/` `core/`, dan `bin/ffmpeg.exe`.
 
+### Tombol download benar-benar berfungsi
+
+pywebview **membatalkan setiap download** kecuali `ALLOW_DOWNLOADS` diset:
+
+```python
+# webview/platforms/edgechromium.py
+def on_download_starting(self, sender, args):
+    if not webview_settings['ALLOW_DOWNLOADS']:
+        args.Cancel = True
+        return
+    dialog = WinForms.SaveFileDialog()
+    ...
+```
+
+Default-nya `False`, jadi di `.exe` semua `st.download_button` (MP3, ZIP batch,
+cover, backup) jadi **mati**: bisa diklik, tanpa dialog, tanpa file, tanpa pesan
+error apa pun. Test suite tidak menangkapnya karena `AppTest` berjalan headless
+lewat HTTP dan tidak pernah menyentuh pywebview.
+
+`runtime_hook_downloads.py` menyalakannya. Hook harus jalan di **bootstrap
+process** yang membuka jendela — bukan di `app.py`, karena anak tidak bisa
+mengubah setting webview milik induk yang sudah terinisialisasi.
+
+Diuji A/B dengan exe pywebview mini + hook yang sama:
+
+| Build | Hasil |
+|---|---|
+| tanpa hook | `RESULT no-dialog` |
+| dengan hook | `RESULT dialog=[('#32770', 'Save As', '960x540')]` |
+
+Dan di `SpotDL.exe` sendiri: klik **Unduh backup TXT** memunculkan dialog
+**Save As** dalam 1 detik, dan file benar-benar tersimpan
+(`Dupe.txt`, 8.257 byte, 216 baris = 213 lagu).
+
 ### Tidak ada jendela terminal hitam
 
 Build memakai `--windowed`. Tanpa flag itu PyInstaller membuat *console

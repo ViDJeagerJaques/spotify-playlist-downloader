@@ -116,8 +116,13 @@ REM              application, so Windows attaches a black terminal that does not
 REM              close when the app window does -- the user has to kill both by
 REM              hand. Verified: with the flag, closing the window takes the whole
 REM              process tree with it (0 processes left after ~4s).
+REM --runtime-hook : enables pywebview downloads. Without it every
+REM   st.download_button is dead in the .exe -- no error, no dialog, no file,
+REM   because pywebview's default ALLOW_DOWNLOADS=False makes it cancel silently.
+REM   The hook must run in the bootstrap process that opens the window, which is
+REM   exactly what a PyInstaller runtime hook does.
 REM PyInstaller separates source from destination with a semicolon on Windows.
-"%SDA%" build app.py --name SpotDL --pyinstaller-options --onefile --noconfirm --windowed --add-data "providers;providers" --add-data "ui;ui" --add-data "core;core" %ADDFFMPEG%
+"%SDA%" build app.py --name SpotDL --pyinstaller-options --onefile --noconfirm --windowed --runtime-hook runtime_hook_downloads.py --add-data "providers;providers" --add-data "ui;ui" --add-data "core;core" %ADDFFMPEG%
 if errorlevel 1 (
     echo [FAIL] build gagal. Scroll ke atas untuk pesan PyInstaller.
     exit /b 1
@@ -127,9 +132,9 @@ echo.
 echo === Verifying the bundle =========================================
 REM Size alone proves nothing: a bundle missing app.py builds fine and then
 REM renders a blank window. Read the archive and confirm the real files.
-"%PY%" -c "from PyInstaller.archive.readers import CArchiveReader as R; import sys; t=list(R('dist/SpotDL.exe').toc); b=[] if 'app.py' in t else b+['app.py']; [b.append(m) for m in ('providers','ui','core') if not [x for x in t if x.lower().startswith(m+chr(92))]]; print('  bundle    :', 'OK' if not b else 'HILANG '+','.join(b)); sys.exit(1 if b else 0)"
+"%PY%" -c "from PyInstaller.archive.readers import CArchiveReader as R; import sys; t=list(R('dist/SpotDL.exe').toc); b=[] if 'app.py' in t else b+['app.py']; [b.append(m) for m in ('providers','ui','core') if not [x for x in t if x.lower().startswith(m+chr(92))]]; h=[x for x in t if 'runtime_hook' in x.lower()]; print('  hook      :', h or 'HILANG'); b += [] if h else ['runtime_hook']; print('  bundle    :', 'OK' if not b else 'HILANG '+','.join(b)); sys.exit(1 if b else 0)"
 if errorlevel 1 (
-    echo [FAIL] bundle tidak lengkap - executable akan tampil kosong.
+    echo [FAIL] bundle tidak lengkap - executable akan tampil kosong atau tombol download mati.
     exit /b 1
 )
 
